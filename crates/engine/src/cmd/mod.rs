@@ -22,6 +22,7 @@ macro_rules! planned {
 
 mod bom;
 mod browser;
+mod cam;
 pub(crate) mod clearance;
 mod clipboard;
 mod clipboard_foreign;
@@ -310,6 +311,7 @@ pub fn not_in_sketch(s: &Session) -> std::result::Result<(), String> {
 /// Every command, in toolbar order.
 pub fn command_specs() -> Vec<&'static CommandSpec> {
     let mut v: Vec<&'static CommandSpec> = Vec::new();
+    v.extend(cam::COMMANDS.iter());
     v.extend(sketch::COMMANDS.iter());
     v.extend(sketch_create::COMMANDS.iter());
     v.extend(sketch_construction::COMMANDS.iter());
