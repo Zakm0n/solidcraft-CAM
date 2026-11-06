@@ -18,6 +18,12 @@ eframe = { workspace = true, features = ["default_fonts", "wgpu", "wayland", "x1
 egui = { workspace = true }
 # The viewport's camera, scene description and rasteriser (crates/render).
 solidcraft-render = { workspace = true }
+# The CAM document: sketch geometry (crates/sketch), solid modeling (crates/kernel) and the
+# STEP/DXF readers (crates/io) are SolidCraft's own core, called by the ribbon's tools.
+solidcraft-geom = { workspace = true }
+solidcraft-sketch = { workspace = true }
+solidcraft-kernel = { workspace = true }
+solidcraft-io = { workspace = true }
 solidcore-record = { workspace = true }
 
 [dev-dependencies]

@@ -9,7 +9,10 @@
 mod raster;
 
 use cam_workspace::app::{CamWorkspaceApp, LEFT_PANEL_MIN_WIDTH, LEFT_PANEL_WIDTH, RIBBON_HEIGHT};
+use cam_workspace::document::{DEFAULT_EXTRUDE_DEPTH, WireTool};
 use cam_workspace::left_manager::ManagerTab;
+use cam_workspace::viewport::WIREFRAME;
+use solidcore_record::Vec3;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -19,11 +22,27 @@ const SIZE: egui::Vec2 = egui::vec2(1280.0, 800.0);
 /// Frames to run before the shot: the first frame sizes panels, the next settles their contents.
 const WARMUP_FRAMES: usize = 3;
 
+/// Frames the workspace with the same part a CAM programmer would show: a plate extruded on
+/// level 1, a boss on level 2, so the manager and the viewport both have something to say.
+fn seed_part(app: &mut CamWorkspaceApp) {
+    // Level 1 (`X`): a rectangular plate.
+    app.document.draw(WireTool::Rectangle).expect("the rectangle tool draws on a new document");
+    app.document.extrude(DEFAULT_EXTRUDE_DEPTH).expect("the rectangle extrudes into a plate");
+    // Level 2: a round boss built on a level of its own.
+    app.document.add_level();
+    app.document.draw(WireTool::Circle).expect("the circle tool draws on the new level");
+    app.document.extrude(DEFAULT_EXTRUDE_DEPTH).expect("the circle extrudes into a boss");
+    // Frame the part rather than the whole grid the home view shows.
+    app.viewport.camera.target = Vec3::new(70.0, 25.0, 6.0);
+    app.viewport.camera.distance = 240.0;
+}
+
 /// Renders one tab of the workspace and saves it under `target/shots`.
 fn shot(name: &str, tab: ManagerTab) -> image::RgbaImage {
     let ctx = egui::Context::default();
     let mut app = CamWorkspaceApp::with_context(&ctx);
     app.manager.tab = tab;
+    seed_part(&mut app);
     let mut textures = HashMap::new();
     let mut output = None;
     for _ in 0..WARMUP_FRAMES {
@@ -78,6 +97,25 @@ fn the_shot_shows_the_live_3d_viewport() {
 }
 
 #[test]
+fn the_shot_shows_the_part_the_ribbon_tools_built() {
+    let image = shot("cam-workspace", ManagerTab::Levels);
+    // The wireframe of level 2's circle is drawn in the WIREFRAME blue.
+    let (mut wire, mut shaded) = (0usize, 0usize);
+    for pixel in viewport_pixels(&image) {
+        let [r, g, b, _] = pixel.0;
+        if (r as i32 - i32::from(WIREFRAME.0)).abs() < 40 && (b as i32 - i32::from(WIREFRAME.2)).abs() < 60 && b > r {
+            wire += 1;
+        }
+        // Shaded solid faces vary with the light, but stay a cool mid grey.
+        if (90..=200).contains(&r) && (100..=210).contains(&g) && (120..=225).contains(&b) && b > g && g > r {
+            shaded += 1;
+        }
+    }
+    assert!(wire > 100, "the circle's wireframe is drawn, got {wire} wireframe pixels");
+    assert!(shaded > 1000, "the extruded bodies are drawn, got {shaded} shaded pixels");
+}
+
+#[test]
 fn every_manager_tab_renders_its_view() {
     for (name, tab) in [
         ("cam-workspace-toolpaths", ManagerTab::Toolpaths),
@@ -88,6 +126,19 @@ fn every_manager_tab_renders_its_view() {
         let colours = image.pixels().map(|p| p.0).collect::<std::collections::BTreeSet<_>>();
         assert!(colours.len() > 16, "{name} must show drawn UI, got {} colours", colours.len());
     }
+}
+
+#[test]
+fn the_solids_shot_lists_the_part_the_tools_built() {
+    let ctx = egui::Context::default();
+    let app = CamWorkspaceApp::with_context(&ctx);
+    assert!(app.document.solids().is_empty(), "a new workspace is empty");
+    let mut app = app;
+    seed_part(&mut app);
+    assert_eq!(app.document.solids().len(), 2);
+    assert_eq!(app.document.levels().len(), 2);
+    assert_eq!(app.document.solids()[0].level, 1);
+    assert_eq!(app.document.solids()[1].level, 2, "the boss belongs to the level it was drawn on");
 }
 
 #[test]

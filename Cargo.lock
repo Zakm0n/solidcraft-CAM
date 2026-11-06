@@ -705,7 +705,11 @@ dependencies = [
  "egui",
  "image",
  "solidcore-record",
+ "solidcraft-geom",
+ "solidcraft-io",
+ "solidcraft-kernel",
  "solidcraft-render",
+ "solidcraft-sketch",
 ]
 
 [[package]]

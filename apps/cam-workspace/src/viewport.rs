@@ -6,13 +6,16 @@
 //! the screenshot harness show the same image. The scene is rebuilt whenever the camera or the
 //! viewport changes and uploaded to egui as one texture; a still view costs nothing.
 //!
-//! Until the document arrives (later phases) the scene is the workspace floor: the ground grid,
-//! the origin gnomon and the scale bar. Toolpath moves, stock and bodies are added to the same
-//! scene by the phases that create them.
+//! The scene is the document: the workspace floor and origin gnomon, the wireframe of every
+//! visible level, and the display mesh of every visible solid. Toolpath moves and stock join the
+//! same scene in the phases that create them.
 
 use egui::{Align2, Color32, FontId, PointerButton, Rect, Sense, Stroke, TextureHandle, Ui, Vec2};
 use solidcore_record::Vec3;
-use solidcraft_render::{Camera, Rgb, Scene, SceneLine, StandardView, render};
+use solidcraft_render::{Camera, Rgb, Scene, SceneLine, SceneMesh, StandardView, render};
+
+use crate::document::CamDocument;
+use crate::ribbon::{ViewCommand, ViewCommand::*};
 
 /// Background gradient of the viewport, top and bottom: the light workspace the shell uses.
 pub const BACKGROUND_TOP: Rgb = Rgb(240, 243, 247);
@@ -21,6 +24,12 @@ pub const BACKGROUND_BOTTOM: Rgb = Rgb(203, 210, 221);
 /// The ground grid's minor and major line colours.
 pub const GRID_MINOR: Rgb = Rgb(196, 202, 212);
 pub const GRID_MAJOR: Rgb = Rgb(170, 178, 190);
+
+/// The wireframe of the levels: a deep blue that reads on the light ground grid.
+pub const WIREFRAME: Rgb = Rgb(30, 70, 140);
+
+/// The solid bodies' fill: a cool steel that separates the part from the background.
+pub const SOLID_FILL: Rgb = Rgb(138, 152, 174);
 
 /// The origin axes: X, Y and Z, the same colours every SolidCraft view draws them in.
 pub const AXIS_X: Rgb = Rgb(220, 60, 60);
@@ -89,12 +98,14 @@ struct Rendered {
     texture: TextureHandle,
 }
 
-/// What a picture depends on: the camera and the pixel size. The scene is deterministic.
+/// What a picture depends on: the camera, the pixel size and the document revision. The scene is
+/// deterministic, so those three decide whether the picture must be drawn again.
 #[derive(Clone, Copy, PartialEq)]
 struct RenderKey {
     camera: Camera,
     width: u32,
     height: u32,
+    revision: u64,
 }
 
 impl Default for Viewport {
@@ -158,11 +169,22 @@ pub fn gnomon_lines() -> [SceneLine; 3] {
     [arm(AXIS_X, Vec3::new(1.0, 0.0, 0.0)), arm(AXIS_Y, Vec3::new(0.0, 1.0, 0.0)), arm(AXIS_Z, Vec3::new(0.0, 0.0, 1.0))]
 }
 
-/// The scene the viewport draws now: the background, the ground grid and the gnomon.
-pub fn scene() -> Scene {
+/// The scene the viewport draws: the background, the ground grid, the gnomon, the visible
+/// levels' wireframe and the visible solids.
+pub fn scene(document: &CamDocument) -> Scene {
     let mut scene = Scene { background: Some((BACKGROUND_TOP, BACKGROUND_BOTTOM)), radius: SCENE_RADIUS, ..Scene::default() };
     scene.grid = grid_lines();
-    scene.lines = gnomon_lines().into_iter().collect();
+    let mut lines: Vec<SceneLine> = gnomon_lines().into_iter().collect();
+    for wire in document.wireframe_lines() {
+        lines.push(SceneLine { points: wire.points, color: WIREFRAME, alpha: 1.0, width: 1.6, on_top: true });
+    }
+    scene.lines = lines;
+    scene.meshes = document
+        .solids()
+        .iter()
+        .filter(|solid| solid.visible && document.level_visible(solid.level))
+        .map(|solid| SceneMesh::solid(solid.mesh.clone(), SOLID_FILL))
+        .collect();
     scene
 }
 
@@ -213,6 +235,17 @@ impl Viewport {
         self.camera = home_camera();
     }
 
+    /// Moves the camera to a standard view, keeping its target and distance.
+    pub fn set_view(&mut self, view: ViewCommand) {
+        match view {
+            Home => self.home(),
+            Top => self.camera.set_view(StandardView::Top),
+            Front => self.camera.set_view(StandardView::Front),
+            Right => self.camera.set_view(StandardView::Right),
+            Iso => self.camera.set_view(StandardView::Iso),
+        }
+    }
+
     /// World length one screen point covers at the camera's target: the scale bar's unit.
     pub fn world_per_point(&self, viewport_height: f32) -> f64 {
         let height = f64::from(viewport_height).max(1.0);
@@ -243,7 +276,7 @@ impl Viewport {
 
     /// Draws the viewport into the space `ui` has left: the picture, the gnomon labels, the
     /// view controls and the scale bar.
-    pub fn ui(&mut self, ui: &mut Ui) {
+    pub fn ui(&mut self, ui: &mut Ui, document: &CamDocument) {
         let rect = ui.available_rect_before_wrap();
         if rect.width() < 1.0 || rect.height() < 1.0 {
             return;
@@ -254,7 +287,7 @@ impl Viewport {
         if response.double_clicked() {
             self.home();
         }
-        self.refresh(ui, rect);
+        self.refresh(ui, rect, document);
 
         if let Some(picture) = &self.picture {
             let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -289,15 +322,15 @@ impl Viewport {
 
     /// Re-renders the picture when the camera or the viewport changed, and uploads it. The
     /// picture is drawn at the screen's pixel density, up to [`MAX_RENDER_SIDE`].
-    fn refresh(&mut self, ui: &Ui, rect: Rect) {
+    fn refresh(&mut self, ui: &Ui, rect: Rect, document: &CamDocument) {
         let ppp = ui.ctx().pixels_per_point().clamp(0.5, 4.0);
         let width = ((rect.width() * ppp).round() as u32).clamp(1, MAX_RENDER_SIDE);
         let height = ((rect.height() * ppp).round() as u32).clamp(1, MAX_RENDER_SIDE);
-        let key = RenderKey { camera: self.camera, width, height };
+        let key = RenderKey { camera: self.camera, width, height, revision: document.revision() };
         if self.picture.as_ref().is_some_and(|picture| picture.key == key) {
             return;
         }
-        let canvas = render(&scene(), &self.camera, width as usize, height as usize);
+        let canvas = render(&scene(document), &self.camera, width as usize, height as usize);
         let image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &canvas.rgba);
         let texture = ui.ctx().load_texture("cam_viewport", image, egui::TextureOptions::LINEAR);
         self.picture = Some(Rendered { key, texture });
@@ -430,11 +463,47 @@ mod tests {
 
     #[test]
     fn the_scene_draws_the_grid_and_the_gnomon() {
-        let scene = scene();
+        let document = CamDocument::default();
+        let scene = scene(&document);
         assert_eq!(scene.grid.len(), 100);
         assert_eq!(scene.lines.len(), 3);
+        assert!(scene.meshes.is_empty(), "an empty document draws no bodies");
         assert_eq!(scene.background, Some((BACKGROUND_TOP, BACKGROUND_BOTTOM)));
         assert_eq!(scene.radius, SCENE_RADIUS);
+    }
+
+    #[test]
+    fn the_scene_draws_the_documents_wireframe_and_solids() {
+        use crate::document::WireTool;
+
+        let mut document = CamDocument::default();
+        document.draw(WireTool::Rectangle).unwrap_or_default();
+        document.extrude(10.0).unwrap_or_default();
+        let drawn = scene(&document);
+        assert_eq!(drawn.lines.len(), 3 + 4, "the gnomon and the rectangle's four lines");
+        assert!(drawn.lines[3..].iter().all(|line| line.color == WIREFRAME && line.on_top));
+        assert_eq!(drawn.meshes.len(), 1);
+        assert_eq!(drawn.meshes[0].color, SOLID_FILL);
+        assert!(drawn.meshes[0].closed);
+
+        document.set_solid_visible(document.solids()[0].id, false);
+        assert!(scene(&document).meshes.is_empty(), "a hidden body is not drawn");
+        document.set_solid_visible(document.solids()[0].id, true);
+        document.set_level_visible(1, false);
+        let hidden = scene(&document);
+        assert!(hidden.meshes.is_empty(), "a body on a hidden level is not drawn");
+        assert_eq!(hidden.lines.len(), 3, "and neither is its wireframe");
+    }
+
+    #[test]
+    fn a_standard_view_moves_the_camera() {
+        let mut viewport = Viewport::default();
+        viewport.set_view(ViewCommand::Top);
+        assert!((viewport.camera.pitch - std::f64::consts::FRAC_PI_2).abs() < 1e-5, "the Top view looks down the Z axis");
+        viewport.set_view(ViewCommand::Home);
+        assert_eq!(viewport.camera, home_camera());
+        viewport.set_view(ViewCommand::Iso);
+        assert_eq!(viewport.camera.distance, HOME_DISTANCE, "a view keeps the home distance");
     }
 
     #[test]

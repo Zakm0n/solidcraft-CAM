@@ -1,26 +1,23 @@
 //! The CAM workspace: application state and the frame loop.
 //!
-//! The window is a workspace rather than a black screen: the status bar and the ribbon claim
+//! The window is a workspace rather than a black screen: the ribbon and the status bar claim
 //! their space first, then the unified left manager panels the model, and the central panel keeps
-//! whatever remains for the 3D viewport.
+//! whatever remains for the 3D viewport. The document under all of them is the same one the
+//! ribbon's tools edit and the manager lists, so a shape drawn on the active level shows up in
+//! the viewport and its solid shows up in the manager at once.
 
 use egui::{Align, Color32, Layout};
 
-use crate::left_manager::{ACTIVE_HIGHLIGHT_LIGHT, ACTIVE_HIGHLIGHT_TEXT, LeftManager};
+use crate::document::{CamDocument, ImportSummary, SolidTool, WireTool};
+use crate::left_manager::LeftManager;
+use crate::ribbon::{Command, ImportKind, Ribbon, ViewCommand};
 use crate::viewport::Viewport;
+
+pub use crate::ribbon::{RIBBON_HEIGHT, RIBBON_TAB_HEIGHT};
 
 /// Background of the 3D viewport (light grey-blue), so the region reserved for graphics reads as
 /// workspace instead of unrendered black.
 pub const VIEWPORT_BACKGROUND: Color32 = Color32::from_rgb(216, 220, 227);
-
-/// Height of the ribbon, in points: the tab strip and the command area under it.
-pub const RIBBON_HEIGHT: f32 = 120.0;
-
-/// Height of the ribbon's tab strip, in points: a compact CAD tab row.
-pub const RIBBON_TAB_HEIGHT: f32 = 24.0;
-
-/// Height of the ribbon's command area, in points: the home of the toolbar's buttons.
-pub const RIBBON_COMMAND_HEIGHT: f32 = 60.0;
 
 /// Height of the status bar, in points: one line of coordinates.
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
@@ -35,49 +32,6 @@ pub const STATUS_BAR_TEXT: Color32 = Color32::WHITE;
 /// viewport get the screen real estate.
 pub const PADDING: f32 = 4.0;
 
-/// The ribbon's tabs, left to right, each a domain of tools.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RibbonTab {
-    /// The modelling and file commands shared by every workflow.
-    #[default]
-    Home,
-    /// Points, curves and construction geometry.
-    Wireframe,
-    /// Surfaces built from curves.
-    Surfaces,
-    /// Solid primitives and features.
-    Solids,
-    /// Machining operations.
-    Toolpaths,
-}
-
-impl RibbonTab {
-    /// The tabs in the order they appear, left to right.
-    pub const ALL: [Self; 5] = [Self::Home, Self::Wireframe, Self::Surfaces, Self::Solids, Self::Toolpaths];
-
-    /// The tab's text in the tab strip.
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Home => "Home",
-            Self::Wireframe => "Wireframe",
-            Self::Surfaces => "Surfaces",
-            Self::Solids => "Solids",
-            Self::Toolpaths => "Toolpaths",
-        }
-    }
-
-    /// Placeholder commands for the tab's command area, until the real toolbars exist.
-    pub const fn placeholder_commands(self) -> &'static [&'static str] {
-        match self {
-            Self::Home => &["New", "Open", "Save", "Undo", "Redo"],
-            Self::Wireframe => &["Points", "Lines", "Arcs", "Splines"],
-            Self::Surfaces => &["Loft", "Revolve", "Sweep", "Trim"],
-            Self::Solids => &["Extrude", "Revolve", "Loft", "Boolean", "Fillet"],
-            Self::Toolpaths => &["Rough", "Finish", "Drill", "Simulate"],
-        }
-    }
-}
-
 /// Width of the left manager panel, in points, until the user drags its edge.
 pub const LEFT_PANEL_WIDTH: f32 = 320.0;
 
@@ -89,15 +43,65 @@ pub const LEFT_PANEL_MIN_WIDTH: f32 = 250.0;
 /// viewport rather than serve it.
 pub const LEFT_PANEL_MAX_WIDTH: f32 = 500.0;
 
+/// What the status bar says before the first command.
+pub const READY_STATUS: &str = "Ready";
+
 /// The CAM workspace application.
 #[derive(Debug, Default)]
 pub struct CamWorkspaceApp {
-    /// The ribbon tab whose tools the command area shows.
-    active_ribbon_tab: RibbonTab,
+    /// The ribbon, and the tab whose tools the command area shows.
+    pub ribbon: Ribbon,
     /// The unified left manager: levels, toolpaths, planes and solids.
     pub manager: LeftManager,
+    /// The document the ribbon edits and the manager lists.
+    pub document: CamDocument,
     /// The 3D viewport: the camera, the scene it draws and its overlays.
     pub viewport: Viewport,
+    /// The last command's result, shown in the status bar.
+    status: String,
+    /// The import dialog, while one is open.
+    import: Option<ImportDialog>,
+}
+
+/// The import dialog: a path field and the button that reads the file into the active level.
+#[derive(Clone, Debug)]
+struct ImportDialog {
+    /// The format being imported, which fixes the title and the expected extension.
+    kind: ImportKind,
+    /// The file path as typed.
+    path: String,
+    /// Why the last attempt failed, if it did.
+    error: Option<String>,
+}
+
+impl ImportDialog {
+    /// A dialog for `kind`, with an empty path.
+    fn new(kind: ImportKind) -> Self {
+        Self { kind, path: String::new(), error: None }
+    }
+
+    /// Reads the file and imports it into the document's active level.
+    fn run(&self, document: &mut CamDocument) -> Result<String, String> {
+        let path = self.path.trim();
+        if path.is_empty() {
+            return Err(format!("Type the path to a .{} file", self.kind.extension()));
+        }
+        let text = std::fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
+        let name = std::path::Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or(path);
+        let summary = match self.kind {
+            ImportKind::Step => document.import_step(&text, name),
+            ImportKind::Dxf => document.import_dxf(&text, name),
+        }
+        .map_err(|error| error.to_string())?;
+        Ok(import_message(name, summary))
+    }
+}
+
+/// The status line an import leaves behind.
+fn import_message(name: &str, summary: ImportSummary) -> String {
+    let noun = if summary.added == 1 { "entity" } else { "entities" };
+    let skipped = if summary.skipped == 0 { String::new() } else { format!(", {} skipped", summary.skipped) };
+    format!("Imported {} {noun} from {name}{skipped}", summary.added)
 }
 
 impl CamWorkspaceApp {
@@ -109,44 +113,80 @@ impl CamWorkspaceApp {
     /// Creates the app against any egui context: the window's, or a headless one in a test.
     pub fn with_context(ctx: &egui::Context) -> Self {
         install_style(ctx);
-        Self::default()
+        Self { status: READY_STATUS.to_string(), ..Self::default() }
     }
 
-    /// The ribbon: the tab strip and, under it, the command area of the active tab.
-    fn ribbon(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("ribbon_panel").exact_size(RIBBON_HEIGHT).show(ui, |ui| {
-            // Compact tabs: a CAD ribbon spends its height on commands, not on tab labels.
-            ui.spacing_mut().interact_size.y = RIBBON_TAB_HEIGHT;
-            ui.horizontal_wrapped(|ui| {
-                for tab in RibbonTab::ALL {
-                    ui.selectable_value(&mut self.active_ribbon_tab, tab, tab.label());
-                }
-            });
-            ui.separator();
-            // The active tab's tools go here. Until they exist, disabled buttons hold their
-            // places, so the command area reads as a toolbar rather than as a gap.
-            let command_area = egui::vec2(ui.available_width(), ui.available_height().max(RIBBON_COMMAND_HEIGHT));
-            ui.allocate_ui_with_layout(command_area, Layout::left_to_right(Align::Center), |ui| {
-                for command in self.active_ribbon_tab.placeholder_commands() {
-                    ui.add_enabled(false, egui::Button::new(*command));
-                }
-            });
-        });
+    /// The last command's result, as the status bar shows it.
+    pub fn status(&self) -> &str {
+        self.status.as_str()
     }
 
-    /// The status bar: the application state a user checks while modelling.
-    fn status_bar(ui: &mut egui::Ui) {
+    /// Whether the import dialog is open.
+    pub fn import_open(&self) -> bool {
+        self.import.is_some()
+    }
+
+    /// Runs the command a ribbon button asked for, and reports the result in the status bar.
+    pub fn run(&mut self, command: Command) {
+        match command {
+            Command::Draw(tool) => self.run_draw(tool),
+            Command::Solid(tool) => self.run_solid(tool),
+            Command::Import(kind) => self.import = Some(ImportDialog::new(kind)),
+            Command::View(view) => {
+                self.apply_view(view);
+                self.status = format!("{} view", view.label());
+            }
+        }
+    }
+
+    /// Draws a wireframe shape on the active level and reports what landed.
+    fn run_draw(&mut self, tool: WireTool) {
+        let level = self.document.active_level();
+        match self.document.draw(tool) {
+            Ok(added) => {
+                let noun = if added == 1 { "entity" } else { "entities" };
+                self.status = format!("{}: added {added} {noun} to level {level}", tool.label());
+            }
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    /// Models a solid from the active level's wireframe and reports what landed.
+    fn run_solid(&mut self, tool: SolidTool) {
+        let level = self.document.active_level();
+        match self.document.solid(tool) {
+            Ok(count) => {
+                let noun = if count == 1 { "body" } else { "bodies" };
+                self.status = format!("{}: {count} {noun} on level {level}", tool.label());
+            }
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    /// Moves the camera to a standard view.
+    fn apply_view(&mut self, view: ViewCommand) {
+        self.viewport.set_view(view);
+    }
+
+    /// The status bar: the active level, the last command and the construction plane.
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let level = self.document.active_level_name().to_string();
+        let plane = self.document.active_plane_name();
+        let solids = self.document.solids().len();
+        let status = self.status.clone();
         let frame = egui::Frame::new().fill(STATUS_BAR_BACKGROUND).inner_margin(egui::Margin::symmetric(8, 2));
         egui::Panel::bottom("status_bar").exact_size(STATUS_BAR_HEIGHT).frame(frame).show(ui, |ui| {
             ui.visuals_mut().override_text_color = Some(STATUS_BAR_TEXT);
             ui.horizontal_centered(|ui| {
-                // Left: the sketch and selection state.
-                ui.label("Section View: Off");
+                // Left: the creation level and what the document holds.
+                ui.label(format!("Level: {level}"));
                 ui.separator();
-                ui.label("X 0.000   Y 0.000   Z 0.000");
-                // Right: the construction plane the coordinates are in.
+                ui.label(format!("{solids} solid(s)"));
+                ui.separator();
+                ui.label(status);
+                // Right: the construction plane new geometry is drawn on.
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label("CPLANE: Top");
+                    ui.label(format!("CPLANE: {plane}"));
                 });
             });
         });
@@ -160,21 +200,63 @@ impl CamWorkspaceApp {
             .default_size(LEFT_PANEL_WIDTH)
             .min_size(LEFT_PANEL_MIN_WIDTH)
             .max_size(LEFT_PANEL_MAX_WIDTH)
-            .show(ui, |ui| self.manager.ui(ui));
+            .show(ui, |ui| self.manager.ui(ui, &mut self.document));
+    }
+
+    /// The import dialog, while one is open: it is a modal window over the viewport.
+    fn import_dialog(&mut self, ui: &mut egui::Ui) {
+        let Some(mut dialog) = self.import.take() else { return };
+        let mut close = false;
+        let mut run = false;
+        let mut still_open = true;
+        egui::Window::new(dialog.kind.title()).collapsible(false).resizable(false).open(&mut still_open).show(ui.ctx(), |ui| {
+            ui.label(format!("Path to a .{} file:", dialog.kind.extension()));
+            let hint = format!("/path/to/part.{}", dialog.kind.extension());
+            ui.add(egui::TextEdit::singleline(&mut dialog.path).desired_width(360.0).hint_text(hint));
+            ui.horizontal(|ui| {
+                if ui.button("Import").clicked() {
+                    run = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+            if let Some(error) = &dialog.error {
+                ui.colored_label(Color32::from_rgb(180, 40, 40), error);
+            }
+        });
+        if run {
+            match dialog.run(&mut self.document) {
+                Ok(message) => {
+                    self.status = message;
+                    close = true;
+                }
+                Err(error) => dialog.error = Some(error),
+            }
+        }
+        if !still_open {
+            close = true;
+        }
+        if !close {
+            self.import = Some(dialog);
+        }
     }
 
     /// Draws one frame of the workspace into `ui`: the panels first, the viewport last.
     pub fn draw(&mut self, ui: &mut egui::Ui) {
-        // The peripheral panels claim their space first, in the blueprint's order: ribbon, status
-        // bar, manager panel.
-        self.ribbon(ui);
-        Self::status_bar(ui);
+        // The ribbon runs its button's command after it has drawn, so the panel is not borrowed
+        // while the document changes.
+        if let Some(command) = self.ribbon.ui(ui) {
+            self.run(command);
+        }
+        self.status_bar(ui);
         self.manager_panel(ui);
 
         // Last, so that it fills what the panels leave over: the live 3D viewport.
         egui::CentralPanel::default().frame(egui::Frame::new().fill(VIEWPORT_BACKGROUND)).show(ui, |ui| {
-            self.viewport.ui(ui);
+            self.viewport.ui(ui, &self.document);
         });
+        self.import_dialog(ui);
     }
 }
 
@@ -185,13 +267,73 @@ pub fn install_style(ctx: &egui::Context) {
     ctx.global_style_mut(|style| {
         style.spacing.item_spacing = egui::vec2(PADDING, PADDING);
         style.spacing.button_padding = egui::vec2(PADDING, PADDING);
-        style.visuals.selection.bg_fill = ACTIVE_HIGHLIGHT_LIGHT;
-        style.visuals.selection.stroke = egui::Stroke::new(1.0, ACTIVE_HIGHLIGHT_TEXT);
+        style.visuals.selection.bg_fill = crate::left_manager::ACTIVE_HIGHLIGHT_LIGHT;
+        style.visuals.selection.stroke = egui::Stroke::new(1.0, crate::left_manager::ACTIVE_HIGHLIGHT_TEXT);
     });
+}
+
+impl ViewCommand {
+    /// The status-bar name of a standard view.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Home => "Home",
+            Self::Top => "Top",
+            Self::Front => "Front",
+            Self::Right => "Right",
+            Self::Iso => "Isometric",
+        }
+    }
 }
 
 impl eframe::App for CamWorkspaceApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_command_reports_its_result_in_the_status_bar() {
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        assert_eq!(app.status(), READY_STATUS);
+        app.run(Command::Draw(WireTool::Rectangle));
+        assert_eq!(app.status(), "Rectangle: added 4 entities to level 1");
+        assert_eq!(app.document.levels()[0].entity_count, 4);
+        app.run(Command::Solid(SolidTool::Extrude));
+        assert_eq!(app.status(), "Extrude: 1 body on level 1");
+        assert_eq!(app.document.solids().len(), 1);
+    }
+
+    #[test]
+    fn a_failing_command_explains_itself_instead_of_doing_nothing() {
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        app.run(Command::Solid(SolidTool::Extrude));
+        assert!(app.status().contains("no wireframe"), "status: {}", app.status());
+        assert!(app.document.solids().is_empty());
+    }
+
+    #[test]
+    fn the_import_command_opens_the_dialog() {
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        app.run(Command::Import(ImportKind::Step));
+        assert!(app.import_open());
+    }
+
+    #[test]
+    fn the_view_commands_move_the_camera() {
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        app.viewport.camera.orbit(30.0, 15.0);
+        app.run(Command::View(ViewCommand::Top));
+        assert!((app.viewport.camera.pitch - std::f64::consts::FRAC_PI_2).abs() < 1e-5, "the Top view looks down the Z axis");
+        app.run(Command::View(ViewCommand::Home));
+        assert_eq!(app.viewport.camera, crate::viewport::home_camera());
+        assert_eq!(app.status(), "Home view");
     }
 }
