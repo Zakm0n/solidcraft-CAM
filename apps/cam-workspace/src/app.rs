@@ -15,6 +15,7 @@ use solidcraft_cam::toolpath::Toolpath;
 
 use crate::dialogs_cam::{Contour2DDialog, Contour2DOutcome, StockOutcome, StockSetupDialog, ToolLibraryDialog, ToolLibraryOutcome};
 use crate::document::{CamDocument, ImportSummary, SolidTool, WireTool};
+use crate::files::{self, Picked};
 use crate::left_manager::{LeftManager, ManagerAction};
 use crate::ribbon::{Command, ImportKind, Ribbon, RibbonTab, SimulationCommand, ViewCommand};
 use crate::simulation_panel::{self, SimulationAction};
@@ -89,7 +90,8 @@ pub struct CamWorkspaceApp {
 struct ImportDialog {
     /// The format being imported, which fixes the title and the expected extension.
     kind: ImportKind,
-    /// The file path as typed.
+    /// The file path as typed (a browser has no path to type: it shows its own dialog).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     path: String,
     /// Why the last attempt failed, if it did.
     error: Option<String>,
@@ -101,14 +103,21 @@ impl ImportDialog {
         Self { kind, path: String::new(), error: None }
     }
 
-    /// Reads the file and imports it into the document's active level.
+    /// Reads the file named in the path field and imports it into the document's active level.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn run(&self, document: &mut CamDocument) -> Result<String, String> {
         let path = self.path.trim();
         if path.is_empty() {
             return Err(format!("Type the path to a .{} file", self.kind.extension()));
         }
-        let text = std::fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
+        let bytes = std::fs::read(path).map_err(|error| format!("{path}: {error}"))?;
         let name = std::path::Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or(path);
+        self.import_bytes(document, name, &bytes)
+    }
+
+    /// Imports bytes a file dialog read, under the name it reports, into the active level.
+    fn import_bytes(&self, document: &mut CamDocument, name: &str, bytes: &[u8]) -> Result<String, String> {
+        let text = String::from_utf8_lossy(bytes);
         let summary = match self.kind {
             ImportKind::Step => document.import_step(&text, name),
             ImportKind::Dxf => document.import_dxf(&text, name),
@@ -583,17 +592,39 @@ impl CamWorkspaceApp {
 
     /// The import dialog, while one is open: it is a modal window over the viewport.
     fn import_dialog(&mut self, ui: &mut egui::Ui) {
+        // The browser answers its file dialog asynchronously: apply the answer on the frame it
+        // arrives, before the dialog draws the result.
+        if let Some(picked) = files::take() {
+            self.answer_import(picked);
+        }
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let Some(mut dialog) = self.import.take() else { return };
         let mut close = false;
+        #[cfg(not(target_arch = "wasm32"))]
         let mut run = false;
+        #[cfg(target_arch = "wasm32")]
+        let mut browse = false;
         let mut still_open = true;
         egui::Window::new(dialog.kind.title()).collapsible(false).resizable(false).open(&mut still_open).show(ui.ctx(), |ui| {
-            ui.label(format!("Path to a .{} file:", dialog.kind.extension()));
-            let hint = format!("/path/to/part.{}", dialog.kind.extension());
-            ui.add(egui::TextEdit::singleline(&mut dialog.path).desired_width(360.0).hint_text(hint));
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                ui.label(format!("Path to a .{} file:", dialog.kind.extension()));
+                let hint = format!("/path/to/part.{}", dialog.kind.extension());
+                ui.add(egui::TextEdit::singleline(&mut dialog.path).desired_width(360.0).hint_text(hint));
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                // A browser has no paths to type: it shows its own file dialog instead.
+                ui.label(format!("Choose a .{} file from this computer:", dialog.kind.extension()));
+            }
             ui.horizontal(|ui| {
+                #[cfg(not(target_arch = "wasm32"))]
                 if ui.button("Import").clicked() {
                     run = true;
+                }
+                #[cfg(target_arch = "wasm32")]
+                if ui.button("Import…").clicked() {
+                    browse = true;
                 }
                 if ui.button("Cancel").clicked() {
                     close = true;
@@ -603,6 +634,7 @@ impl CamWorkspaceApp {
                 ui.colored_label(Color32::from_rgb(180, 40, 40), error);
             }
         });
+        #[cfg(not(target_arch = "wasm32"))]
         if run {
             match dialog.run(&mut self.document) {
                 Ok(message) => {
@@ -612,11 +644,37 @@ impl CamWorkspaceApp {
                 Err(error) => dialog.error = Some(error),
             }
         }
+        #[cfg(target_arch = "wasm32")]
+        if browse {
+            // Only the dialog's own answer belongs to it: drop one left by a dismissed dialog.
+            files::discard();
+            files::pick(dialog.kind, ui.ctx());
+        }
         if !still_open {
             close = true;
         }
         if !close {
             self.import = Some(dialog);
+        }
+    }
+
+    /// Applies the answer of a file dialog to the import dialog that asked for it: the file is
+    /// imported and the dialog closes, or the dialog stays open and shows why it could not be.
+    fn answer_import(&mut self, picked: Picked) {
+        let Some(mut dialog) = self.import.take() else { return };
+        match picked {
+            Picked::File(file) => match dialog.import_bytes(&mut self.document, &file.name, &file.bytes) {
+                Ok(message) => self.status = message,
+                Err(error) => {
+                    dialog.error = Some(error);
+                    self.import = Some(dialog);
+                }
+            },
+            Picked::Cancelled => self.import = Some(dialog),
+            Picked::Failed(error) => {
+                dialog.error = Some(error);
+                self.import = Some(dialog);
+            }
         }
     }
 
@@ -738,6 +796,33 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = CamWorkspaceApp::with_context(&ctx);
         app.run(Command::Import(ImportKind::Step));
+        assert!(app.import_open());
+    }
+
+    /// One DXF line and one DXF circle, the file a browser's dialog would hand back as bytes.
+    const DXF_BYTES: &[u8] = b"0\nSECTION\n2\nENTITIES\n0\nLINE\n10\n0\n20\n0\n11\n40\n21\n0\n0\nCIRCLE\n10\n20\n20\n15\n40\n10\n0\nENDSEC\n0\nEOF\n";
+
+    #[test]
+    fn a_file_the_dialog_read_is_imported_into_the_active_level() {
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        app.run(Command::Import(ImportKind::Dxf));
+        app.answer_import(Picked::File(files::PickedFile { name: "plate.dxf".into(), bytes: DXF_BYTES.to_vec() }));
+        assert!(!app.import_open(), "the dialog closes once its file is imported");
+        assert_eq!(app.status(), "Imported 2 entities from plate.dxf");
+        assert_eq!(app.document.level(1).map(|level| level.entity_count), Some(2), "the entities land on the active level");
+    }
+
+    #[test]
+    fn a_file_the_dialog_could_not_read_keeps_the_dialog_open_with_the_reason() {
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        app.run(Command::Import(ImportKind::Dxf));
+        app.answer_import(Picked::Failed("plate.dxf: the browser could not read the file".into()));
+        assert!(app.import_open(), "the dialog stays open so the reason is visible");
+        assert_eq!(app.document.level(1).map(|level| level.entity_count), Some(0));
+        // Dismissing the browser's dialog changes nothing either.
+        app.answer_import(Picked::Cancelled);
         assert!(app.import_open());
     }
 

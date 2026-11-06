@@ -704,6 +704,7 @@ dependencies = [
  "eframe",
  "egui",
  "image",
+ "js-sys",
  "solidcore-record",
  "solidcraft-cam",
  "solidcraft-geom",
@@ -711,6 +712,9 @@ dependencies = [
  "solidcraft-kernel",
  "solidcraft-render",
  "solidcraft-sketch",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

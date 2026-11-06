@@ -10,6 +10,7 @@
 pub mod app;
 pub mod dialogs_cam;
 pub mod document;
+pub mod files;
 pub mod left_manager;
 pub mod ribbon;
 pub mod simulation_panel;
