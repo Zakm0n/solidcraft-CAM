@@ -703,6 +703,7 @@ version = "0.40.0-rc.2"
 dependencies = [
  "eframe",
  "egui",
+ "image",
 ]
 
 [[package]]

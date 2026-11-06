@@ -16,3 +16,7 @@ workspace = true
 # wgpu: the hardware-accelerated renderer; wayland/x11: the Linux window backends.
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "wayland", "x11"] }
 egui = { workspace = true }
+
+[dev-dependencies]
+# The screenshot harness writes the PNG the milestone evidence records.
+image = { workspace = true }
