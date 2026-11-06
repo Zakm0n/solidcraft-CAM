@@ -25,7 +25,7 @@ use solidcraft_render::{Camera, Rgb, Scene, SceneLine, SceneMesh, StandardView, 
 
 use crate::document::{CamDocument, WireTool, standard_plane};
 use crate::interactive_geom::{
-    ARC_PREVIEW_SEGMENTS, InteractiveGeometry, SNAP_RADIUS_PIXELS, SnapCandidate, SnapKind, WireframeTool, snap_candidates,
+    ARC_PREVIEW_SEGMENTS, ClickOutcome, InteractiveGeometry, PendingWire, SNAP_RADIUS_PIXELS, SnapCandidate, SnapKind, WireframeTool, snap_candidates,
 };
 use crate::ribbon::{ViewCommand, ViewCommand::*};
 
@@ -620,6 +620,31 @@ impl Viewport {
         self.interactive.begin(tool, plane)
     }
 
+    /// Places the live tool's next point where the pointer is — over the projection, the snap,
+    /// or as the typed dimensions moved it — and hands back the wireframe entity when that
+    /// completed one. `None` while the tool is still collecting points, or when no tool is live.
+    pub fn place_point(&mut self) -> Option<PendingWire> {
+        let at = self.interactive.cursor()?;
+        match self.interactive.click(at) {
+            ClickOutcome::Complete(wire) => Some(wire),
+            ClickOutcome::Ignored | ClickOutcome::Progress => None,
+        }
+    }
+
+    /// Ends the live clicking tool, if any, dropping the points it had anchored.
+    pub fn cancel_wireframe_tool(&mut self) {
+        self.interactive.cancel();
+    }
+
+    /// Commits the point under the pointer, as the tool panel's Create button does, and hands
+    /// back the wireframe entity when that completed one.
+    pub fn commit_cursor(&mut self) -> Option<PendingWire> {
+        match self.interactive.commit() {
+            ClickOutcome::Complete(wire) => Some(wire),
+            ClickOutcome::Ignored | ClickOutcome::Progress => None,
+        }
+    }
+
     /// Follows the pointer across the active construction plane: the world point a click would
     /// land on, which is what the wireframe tools anchor and what the coordinate readout shows.
     /// A pointer that is not over the viewport, or a view where the plane is edge-on, leaves no
@@ -630,7 +655,11 @@ impl Viewport {
     fn track_pointer(&mut self, rect: Rect, pointer: Option<egui::Pos2>, document: &CamDocument) {
         self.interactive.set_plane(standard_plane(document.active_plane()));
         let Some(position) = pointer else {
-            self.interactive.clear_hover();
+            // A live tool keeps the last point it followed: the user may be typing its
+            // dimensions into the tool panel, and the rubber band shows what Create commits.
+            if !self.interactive.is_active() {
+                self.interactive.clear_hover();
+            }
             return;
         };
         let x = f64::from(position.x - rect.min.x);
@@ -682,10 +711,14 @@ impl Viewport {
 
     /// Draws the viewport into the space `ui` has left: the picture, the gnomon labels, the
     /// view controls and the scale bar.
-    pub fn ui(&mut self, ui: &mut Ui, document: &CamDocument, operations: &[Operation], simulation: Option<&Simulation>) {
+    ///
+    /// A primary click over the viewport places the live tool's next point; every wireframe
+    /// entity that click completed is returned, for the application to create in the document.
+    /// Escape ends the live tool.
+    pub fn ui(&mut self, ui: &mut Ui, document: &CamDocument, operations: &[Operation], simulation: Option<&Simulation>) -> Vec<PendingWire> {
         let rect = ui.available_rect_before_wrap();
         if rect.width() < 1.0 || rect.height() < 1.0 {
-            return;
+            return Vec::new();
         }
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let input = Self::read_input(ui, &response);
@@ -694,6 +727,14 @@ impl Viewport {
             self.home();
         }
         self.track_pointer(rect, response.hover_pos(), document);
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.cancel_wireframe_tool();
+        }
+        let completed = if self.interactive.is_active() && response.clicked_by(PointerButton::Primary) {
+            self.place_point().into_iter().collect()
+        } else {
+            Vec::new()
+        };
         self.refresh(ui, rect, document, operations, simulation);
 
         if let Some(picture) = &self.picture {
@@ -705,6 +746,7 @@ impl Viewport {
         self.paint_scale_bar(ui, rect);
         // Last, so the controls sit over the picture rather than under it.
         self.view_controls(ui, rect);
+        completed
     }
 
     /// Paints the live wireframe tool over the picture: the cyan rubber band from the anchored
@@ -923,6 +965,55 @@ mod tests {
         viewport.track_pointer(rect, Some(rect.center()), &document);
         assert!(viewport.interactive.is_active());
         assert!(viewport.interactive.tool().current_pos().is_some(), "the line tool follows the cursor");
+    }
+
+    #[test]
+    fn a_click_that_finishes_a_line_hands_it_back_for_creation() {
+        let document = CamDocument::default();
+        let mut viewport = Viewport::default();
+        assert!(viewport.begin_wireframe_tool(WireTool::Line, Plane::XY));
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(400.0, 400.0));
+        viewport.track_pointer(rect, Some(rect.center()), &document);
+        assert_eq!(viewport.place_point(), None, "the first click only anchors the line");
+        assert_eq!(viewport.interactive.placed_points(), 1);
+        let end = rect.center() + Vec2::new(40.0, 0.0);
+        viewport.track_pointer(rect, Some(end), &document);
+        let wire = viewport.place_point().expect("the second click completes the line");
+        let PendingWire::Line { start: from, end: to } = wire else { panic!("a line tool completes a line, got {wire:?}") };
+        assert!(from.dist(to) > 1.0, "the line spans the two clicks, got {from:?} to {to:?}");
+        assert_eq!(viewport.interactive.placed_points(), 1, "the tool stays live at the line's end");
+        viewport.cancel_wireframe_tool();
+        assert!(!viewport.interactive.is_active());
+        assert_eq!(viewport.place_point(), None, "no tool places nothing");
+    }
+
+    #[test]
+    fn a_live_tool_keeps_its_point_when_the_pointer_leaves_the_viewport() {
+        let document = CamDocument::default();
+        let mut viewport = Viewport::default();
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(400.0, 400.0));
+        viewport.track_pointer(rect, Some(rect.center()), &document);
+        viewport.track_pointer(rect, None, &document);
+        assert_eq!(viewport.interactive.hover(), None, "with no tool the pointer leaves no point");
+        assert!(viewport.begin_wireframe_tool(WireTool::Point, Plane::XY));
+        viewport.track_pointer(rect, Some(rect.center()), &document);
+        let hover = viewport.interactive.hover();
+        viewport.track_pointer(rect, None, &document);
+        assert_eq!(viewport.interactive.hover(), hover, "the tool keeps the point the panel's fields apply to");
+    }
+
+    #[test]
+    fn a_typed_length_in_the_tool_panel_moves_the_rubber_band() {
+        let document = CamDocument::default();
+        let mut viewport = Viewport::default();
+        assert!(viewport.begin_wireframe_tool(WireTool::Line, Plane::XY));
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(400.0, 400.0));
+        viewport.track_pointer(rect, Some(rect.center()), &document);
+        viewport.interactive.click(Vec3::ZERO);
+        viewport.track_pointer(rect, Some(rect.center() + Vec2::new(50.0, 0.0)), &document);
+        viewport.interactive.set_dimension(crate::interactive_geom::DimensionField::Length, Some(12.0));
+        let cursor = viewport.interactive.cursor().expect("the tool follows the pointer");
+        assert!((cursor.dist(Vec3::ZERO) - 12.0).abs() < 1e-9, "the typed length locks the band, got {cursor:?}");
     }
 
     #[test]

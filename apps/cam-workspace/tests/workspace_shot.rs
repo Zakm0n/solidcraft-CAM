@@ -11,7 +11,7 @@ mod raster;
 use cam_workspace::app::{CamWorkspaceApp, LEFT_PANEL_MIN_WIDTH, LEFT_PANEL_WIDTH, RIBBON_HEIGHT, STATUS_BAR_HEIGHT};
 use cam_workspace::dialogs_cam::ContourPage;
 use cam_workspace::document::{DEFAULT_EXTRUDE_DEPTH, WireTool};
-use cam_workspace::interactive_geom::{ClickOutcome, SnapKind};
+use cam_workspace::interactive_geom::{ClickOutcome, DimensionField, SnapKind};
 use cam_workspace::left_manager::ManagerTab;
 use cam_workspace::ribbon::{Command, RibbonTab, SimulationCommand};
 use cam_workspace::simulation_panel::SIMULATION_PANEL_BACKGROUND;
@@ -19,6 +19,7 @@ use cam_workspace::viewport::{SCENE_RADIUS, TOOL_FILL, TOOLPATH_FEED, TOOLPATH_R
 use solidcore_record::{Plane, Vec3};
 use solidcraft_cam::operations::contour2d::{Contour2DParams, LeadKind};
 use solidcraft_cam::stock::{StockDef, StockExcess};
+use solidcraft_geom::Vec3Geom;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -106,7 +107,9 @@ fn workspace_shot() -> image::RgbaImage {
 }
 
 /// Leaves a line tool live and anchored at a plate corner, with the pointer over the opposite
-/// corner: the shot then records the rubber band and the green endpoint marker.
+/// corner: the shot then records the rubber band and the green endpoint marker, with the
+/// AutoCursor length field locked to the distance between the two corners — the typed-dimension
+/// workflow the fourth milestone adds.
 fn seed_preview(app: &mut CamWorkspaceApp) {
     let wires = app.document.wireframe_lines();
     let corner = wires.first().and_then(|wire| wire.points.first().copied());
@@ -115,6 +118,12 @@ fn seed_preview(app: &mut CamWorkspaceApp) {
     assert!(app.viewport.begin_wireframe_tool(WireTool::Line, Plane::XY), "a line is placed by clicking");
     assert_eq!(app.viewport.interactive.click(corner), ClickOutcome::Progress, "the first click anchors the line");
     app.viewport.interactive.track_point(target);
+    let length = corner.dist(target);
+    app.viewport.interactive.set_dimension(DimensionField::Length, Some(length));
+    assert!(
+        app.viewport.interactive.cursor().is_some_and(|cursor| cursor.dist(target) < 1e-6),
+        "the typed length ends the band exactly on the corner the pointer aims at"
+    );
 }
 
 /// Where the live tool's pointer is on screen: the projection of the point it is following into

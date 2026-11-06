@@ -133,6 +133,130 @@ fn curve_centre(points: &[Vec3]) -> Option<Vec3> {
     on_circle.then_some(centre)
 }
 
+/// One of the AutoCursor values a user can type to lock how the next point is placed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DimensionField {
+    /// How far the next point is from the last one, in document units.
+    Length,
+    /// The direction of the next point from the last one, in degrees counter-clockwise from the
+    /// construction plane's X axis.
+    Angle,
+    /// The next point's world X coordinate.
+    X,
+    /// The next point's world Y coordinate.
+    Y,
+    /// The next point's world Z coordinate.
+    Z,
+}
+
+impl DimensionField {
+    /// The fields in the order the tool panel lists them.
+    pub const ALL: [Self; 5] = [Self::X, Self::Y, Self::Z, Self::Length, Self::Angle];
+
+    /// The field's label in the tool panel.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Length => "Length",
+            Self::Angle => "Angle",
+            Self::X => "X",
+            Self::Y => "Y",
+            Self::Z => "Z",
+        }
+    }
+
+    /// The unit the field's value is in.
+    pub const fn unit(self) -> &'static str {
+        match self {
+            Self::Angle => "deg",
+            Self::Length | Self::X | Self::Y | Self::Z => "mm",
+        }
+    }
+
+    /// The value the field holds, if the user has locked it.
+    pub const fn get(self, dimensions: &Dimensions) -> Option<f64> {
+        match self {
+            Self::Length => dimensions.length,
+            Self::Angle => dimensions.angle,
+            Self::X => dimensions.x,
+            Self::Y => dimensions.y,
+            Self::Z => dimensions.z,
+        }
+    }
+
+    /// Locks the field to `value`, or frees it with `None`. A negative length and a value that
+    /// is not finite are refused, because neither can place a point; a coordinate may be
+    /// negative, and an angle may run either way round.
+    pub fn set(self, dimensions: &mut Dimensions, value: Option<f64>) {
+        let value = value.filter(|value| value.is_finite() && (self != Self::Length || *value >= 0.0));
+        match self {
+            Self::Length => dimensions.length = value,
+            Self::Angle => dimensions.angle = value,
+            Self::X => dimensions.x = value,
+            Self::Y => dimensions.y = value,
+            Self::Z => dimensions.z = value,
+        }
+    }
+}
+
+/// The values a user has typed to override the pointer: the AutoCursor fields of the tool panel.
+///
+/// A locked axis places that world coordinate; a locked length and angle measure the next point
+/// from the last one placed (or from the construction plane's origin before anything is placed),
+/// so the rubber band obeys the typed dimension instead of the cursor.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Dimensions {
+    /// Distance from the last point, in document units.
+    pub length: Option<f64>,
+    /// Direction from the last point, in degrees.
+    pub angle: Option<f64>,
+    /// World X coordinate.
+    pub x: Option<f64>,
+    /// World Y coordinate.
+    pub y: Option<f64>,
+    /// World Z coordinate.
+    pub z: Option<f64>,
+}
+
+impl Dimensions {
+    /// Whether every field is free, so the pointer alone places the point.
+    pub const fn is_empty(&self) -> bool {
+        self.length.is_none() && self.angle.is_none() && self.x.is_none() && self.y.is_none() && self.z.is_none()
+    }
+
+    /// Frees every field.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// `point` as the locked fields move it.
+    ///
+    /// The axis locks replace the world coordinates of the pointer's projection; a locked angle
+    /// or length then moves the point about `anchor`, which is where the entity already starts.
+    /// When both an axis and a distance are locked, the distance wins: it is the dimension the
+    /// user last typed, and a point cannot honour two lengths at once.
+    fn constrain(&self, point: Vec3, anchor: Vec3, plane: Plane) -> Vec3 {
+        let mut at = Vec3::new(self.x.unwrap_or(point.x), self.y.unwrap_or(point.y), self.z.unwrap_or(point.z));
+        if self.length.is_none() && self.angle.is_none() {
+            return at;
+        }
+        let leg = at - anchor;
+        let direction = match self.angle {
+            Some(degrees) => {
+                let radians = degrees.to_radians();
+                plane.x * radians.cos() + plane.y * radians.sin()
+            }
+            None => match leg.normalized() {
+                Some(direction) => direction,
+                // Nothing to measure from yet: the axis locks are all the point has.
+                None => return at,
+            },
+        };
+        let distance = self.length.unwrap_or_else(|| leg.len());
+        at = anchor + direction * distance;
+        at
+    }
+}
+
 /// Whether the tool is waiting for its first point at all.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LineState {
@@ -175,6 +299,16 @@ pub enum WireframeTool {
 }
 
 impl WireframeTool {
+    /// The tool's name in the tool panel.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "No",
+            Self::Line(_) => "Line",
+            Self::Arc(_) => "Arc",
+            Self::Point(_) => "Point",
+        }
+    }
+
     /// How many of the tool's points the user has already clicked.
     pub const fn placed_points(self) -> usize {
         match self {
@@ -231,6 +365,26 @@ pub enum PendingWire {
     Arc { start: Vec3, end: Vec3, through: Vec3 },
 }
 
+impl PendingWire {
+    /// The world points the entity is built from.
+    pub fn points(self) -> Vec<Vec3> {
+        match self {
+            Self::Point { at } => vec![at],
+            Self::Line { start, end } => vec![start, end],
+            Self::Arc { start, end, through } => vec![start, end, through],
+        }
+    }
+
+    /// The tool name the status bar reports the entity under.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Point { .. } => "Point",
+            Self::Line { .. } => "Line",
+            Self::Arc { .. } => "Arc",
+        }
+    }
+}
+
 /// What one click did to the live tool.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ClickOutcome {
@@ -259,12 +413,14 @@ pub struct InteractiveGeometry {
     hover: Option<Vec3>,
     /// The document feature the pointer has snapped to, if any.
     snap: Option<SnapCandidate>,
+    /// The values the user has typed to lock the next point.
+    dimensions: Dimensions,
 }
 
 impl Default for InteractiveGeometry {
     /// Nothing is live, and positions land on the TOP plane.
     fn default() -> Self {
-        Self { tool: WireframeTool::None, plane: Plane::XY, hover: None, snap: None }
+        Self { tool: WireframeTool::None, plane: Plane::XY, hover: None, snap: None, dimensions: Dimensions::default() }
     }
 }
 
@@ -313,6 +469,56 @@ impl InteractiveGeometry {
         }
     }
 
+    /// The values the user has typed to lock the next point.
+    pub const fn dimensions(&self) -> Dimensions {
+        self.dimensions
+    }
+
+    /// Locks one AutoCursor field to `value`, or frees it with `None`, and moves the rubber band
+    /// to where the locked dimensions put it at once.
+    pub fn set_dimension(&mut self, field: DimensionField, value: Option<f64>) {
+        field.set(&mut self.dimensions, value);
+        if let Some(hover) = self.hover {
+            let at = self.resolve(hover);
+            self.tool.track(at);
+        }
+    }
+
+    /// Frees every typed dimension, so the pointer alone places the next point.
+    pub fn clear_dimensions(&mut self) {
+        self.dimensions.clear();
+        if let Some(hover) = self.hover {
+            let at = self.resolve(hover);
+            self.tool.track(at);
+        }
+    }
+
+    /// The point a click would place now: the pointer's projection as the typed dimensions move
+    /// it. This is where the rubber band ends, and what the tool panel's Create button commits.
+    pub fn cursor(&self) -> Option<Vec3> {
+        self.hover.and(self.tool.current_pos())
+    }
+
+    /// Commits the point under the pointer, as the Create button does: the same work as a
+    /// primary click, for a user who typed the dimensions instead of clicking them.
+    pub fn commit(&mut self) -> ClickOutcome {
+        match self.cursor() {
+            Some(at) => self.click(at),
+            None => ClickOutcome::Ignored,
+        }
+    }
+
+    /// The point the typed dimensions measure from: the tool's last anchor, or the construction
+    /// plane's origin before the tool has taken one.
+    fn anchor(&self) -> Vec3 {
+        self.anchors().last().copied().unwrap_or(self.plane.origin)
+    }
+
+    /// `at` as the locked dimensions place it.
+    fn resolve(&self, at: Vec3) -> Vec3 {
+        if self.dimensions.is_empty() { at } else { self.dimensions.constrain(at, self.anchor(), self.plane) }
+    }
+
     /// The live tool's rubber band in world coordinates: one polyline per preview curve, running
     /// from the anchored point to the pointer, with `arc_segments` straight pieces in an arc.
     /// The point tool has no band — the viewport draws its cursor instead.
@@ -347,9 +553,11 @@ impl InteractiveGeometry {
     }
 
     /// Ends the live tool. Anchored points are dropped; the pointer position is kept, because it
-    /// is still where the cursor is.
+    /// is still where the cursor is, and the typed dimensions are freed with the tool they were
+    /// typed for.
     pub fn cancel(&mut self) {
         self.tool = WireframeTool::None;
+        self.dimensions.clear();
     }
 
     /// Moves the placement plane. Anchored points are dropped, because they belong to the plane
@@ -375,20 +583,30 @@ impl InteractiveGeometry {
     }
 
     /// Remembers `at` as the pointer's position, for a caller that already has the plane point.
+    /// The typed dimensions move the point the tool follows, so the rubber band shows what a
+    /// click would place rather than where the cursor happens to be.
     pub fn track_point(&mut self, at: Vec3) {
         if !at.is_finite() {
             return;
         }
         self.hover = Some(at);
         self.snap = None;
+        let at = self.resolve(at);
         self.tool.track(at);
     }
 
     /// Snaps the pointer to `snap`, or leaves it at the projected point when there is none: the
     /// rubber band ends on the candidate, so the anchor a click would take is the one drawn.
+    ///
+    /// A typed dimension that moves the point away from the candidate does not keep the marker:
+    /// it would claim the click lands on the feature when the dimension places it elsewhere.
     pub fn set_snap(&mut self, snap: Option<SnapCandidate>) {
-        if let Some(snap) = snap {
-            self.track_point(snap.at);
+        if let Some(candidate) = snap {
+            self.track_point(candidate.at);
+            if self.resolve(candidate.at).dist(candidate.at) > POINT_TOLERANCE {
+                self.snap = None;
+                return;
+            }
         }
         self.snap = snap;
     }
@@ -401,13 +619,16 @@ impl InteractiveGeometry {
 
     /// Places one point of the live tool at `at`, and reports what that did.
     ///
-    /// A click on a position that is not finite, or that would make a zero-length line or a
-    /// degenerate arc, is ignored: the tool keeps the points it already has and waits.
+    /// `at` is the pointer's position; the typed dimensions move it first, so a click honours a
+    /// locked length or coordinate exactly as the rubber band drew it. A click on a position that
+    /// is not finite, or that would make a zero-length line or a degenerate arc, is ignored: the
+    /// tool keeps the points it already has and waits.
     pub fn click(&mut self, at: Vec3) -> ClickOutcome {
         if !at.is_finite() {
             return ClickOutcome::Ignored;
         }
         self.track_point(at);
+        let Some(at) = self.cursor() else { return ClickOutcome::Ignored };
         match self.tool {
             WireframeTool::None => ClickOutcome::Ignored,
             WireframeTool::Point(_) => ClickOutcome::Complete(PendingWire::Point { at }),
@@ -688,6 +909,88 @@ mod tests {
         assert_eq!(geometry.preview(ARC_PREVIEW_SEGMENTS), vec![vec![Vec3::ZERO, snap.at]], "the rubber band ends on the snap");
         geometry.track_point(Vec3::new(23.0, 7.0, 0.0));
         assert_eq!(geometry.snap(), None, "moving the pointer off the candidate drops the snap");
+    }
+
+    #[test]
+    fn a_typed_length_locks_the_distance_of_the_next_point() {
+        let mut geometry = line_tool();
+        assert!(matches!(geometry.click(Vec3::ZERO), ClickOutcome::Progress));
+        let pointer = Vec3::new(40.0, 0.0, 0.0);
+        geometry.track_point(pointer);
+        geometry.set_dimension(DimensionField::Length, Some(15.0));
+        assert_eq!(geometry.cursor(), Some(Vec3::new(15.0, 0.0, 0.0)), "the band is 15 mm long, not 40");
+        assert_eq!(geometry.preview(ARC_PREVIEW_SEGMENTS), vec![vec![Vec3::ZERO, Vec3::new(15.0, 0.0, 0.0)]]);
+        assert_eq!(
+            geometry.click(pointer),
+            ClickOutcome::Complete(PendingWire::Line { start: Vec3::ZERO, end: Vec3::new(15.0, 0.0, 0.0) }),
+            "the click commits the typed length, not the cursor's"
+        );
+    }
+
+    #[test]
+    fn a_typed_angle_turns_the_next_point_about_the_last_one() {
+        let mut geometry = line_tool();
+        assert!(matches!(geometry.click(Vec3::new(5.0, 5.0, 0.0)), ClickOutcome::Progress));
+        geometry.track_point(Vec3::new(25.0, 5.0, 0.0));
+        geometry.set_dimension(DimensionField::Angle, Some(90.0));
+        let cursor = geometry.cursor().expect("the tool still follows the pointer");
+        assert!(cursor.dist(Vec3::new(5.0, 25.0, 0.0)) < 1e-9, "due +Y from the anchor, got {cursor:?}");
+        geometry.set_dimension(DimensionField::Length, Some(10.0));
+        let cursor = geometry.cursor().expect("the tool still follows the pointer");
+        assert!(cursor.dist(Vec3::new(5.0, 15.0, 0.0)) < 1e-9, "10 mm along that angle, got {cursor:?}");
+        assert_eq!(geometry.dimensions(), Dimensions { length: Some(10.0), angle: Some(90.0), x: None, y: None, z: None });
+    }
+
+    #[test]
+    fn a_typed_coordinate_places_that_axis() {
+        let mut geometry = InteractiveGeometry::default();
+        assert!(geometry.begin(WireTool::Point, Plane::XY));
+        geometry.track_point(Vec3::new(30.0, 40.0, 0.0));
+        geometry.set_dimension(DimensionField::X, Some(12.0));
+        assert_eq!(geometry.cursor(), Some(Vec3::new(12.0, 40.0, 0.0)), "X is typed, Y still follows the pointer");
+        geometry.set_dimension(DimensionField::Y, Some(-3.0));
+        geometry.set_dimension(DimensionField::Z, Some(5.0));
+        assert_eq!(geometry.cursor(), Some(Vec3::new(12.0, -3.0, 5.0)));
+        assert_eq!(geometry.commit(), ClickOutcome::Complete(PendingWire::Point { at: Vec3::new(12.0, -3.0, 5.0) }));
+    }
+
+    #[test]
+    fn a_freed_dimension_lets_the_pointer_move_the_point_again() {
+        let mut geometry = line_tool();
+        assert!(matches!(geometry.click(Vec3::ZERO), ClickOutcome::Progress));
+        geometry.track_point(Vec3::new(20.0, 0.0, 0.0));
+        geometry.set_dimension(DimensionField::Length, Some(5.0));
+        assert_eq!(geometry.cursor(), Some(Vec3::new(5.0, 0.0, 0.0)));
+        geometry.set_dimension(DimensionField::Length, None);
+        assert_eq!(geometry.cursor(), Some(Vec3::new(20.0, 0.0, 0.0)), "the band follows the pointer again");
+        geometry.clear_dimensions();
+        assert!(geometry.dimensions().is_empty());
+    }
+
+    #[test]
+    fn unusable_dimensions_are_refused() {
+        let mut dimensions = Dimensions::default();
+        DimensionField::Length.set(&mut dimensions, Some(-5.0));
+        assert_eq!(dimensions.length, None, "a negative length places nothing");
+        DimensionField::Length.set(&mut dimensions, Some(f64::NAN));
+        assert_eq!(dimensions.length, None);
+        DimensionField::X.set(&mut dimensions, Some(f64::INFINITY));
+        assert_eq!(dimensions.x, None);
+        DimensionField::Angle.set(&mut dimensions, Some(-45.0));
+        assert_eq!(dimensions.angle, Some(-45.0), "an angle may run either way round");
+        assert_eq!(DimensionField::Angle.unit(), "deg");
+        assert_eq!(DimensionField::ALL.map(DimensionField::label), ["X", "Y", "Z", "Length", "Angle"]);
+    }
+
+    #[test]
+    fn committing_the_cursor_places_what_the_band_shows() {
+        let mut geometry = line_tool();
+        assert!(matches!(geometry.click(Vec3::ZERO), ClickOutcome::Progress));
+        geometry.track_point(Vec3::new(0.0, 30.0, 0.0));
+        geometry.set_dimension(DimensionField::Length, Some(12.0));
+        assert_eq!(geometry.commit(), ClickOutcome::Complete(PendingWire::Line { start: Vec3::ZERO, end: Vec3::new(0.0, 12.0, 0.0) }));
+        geometry.cancel();
+        assert!(geometry.dimensions().is_empty(), "a new tool starts with free fields");
     }
 
     #[test]

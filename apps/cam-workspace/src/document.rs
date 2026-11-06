@@ -18,9 +18,11 @@ use solidcore_record::{Plane, Region2, Vec2, Vec3};
 use solidcraft_cam::operations::contour2d::ChainCurve;
 use solidcraft_cam::stock::StockDef;
 use solidcraft_geom::Mesh;
-use solidcraft_geom::PlaneGeom;
+use solidcraft_geom::{PlaneGeom, Vec2Geom, Vec3Geom};
 use solidcraft_kernel::{Body, BoolOp, MeshTolerance};
 use solidcraft_sketch::{CurveKind, Sketch, find_profiles};
+
+use crate::interactive_geom::{POINT_TOLERANCE, PendingWire};
 
 /// The standard construction planes, in the order the manager lists them.
 pub const STANDARD_PLANES: [&str; 6] = ["TOP", "FRONT", "RIGHT", "BACK", "LEFT", "BOTTOM"];
@@ -262,6 +264,12 @@ impl std::fmt::Display for CamError {
 
 impl std::error::Error for CamError {}
 
+/// The [`STANDARD_PLANES`] name of a construction plane, or `"custom"` for one the manager does
+/// not list.
+fn plane_name(plane: Plane) -> &'static str {
+    (0..STANDARD_PLANES.len()).find(|index| standard_plane(*index) == plane).map_or("custom", |index| STANDARD_PLANES[index])
+}
+
 /// One level's wireframe, with the construction plane it was started on.
 #[derive(Clone, Debug)]
 struct LevelSketch {
@@ -468,9 +476,54 @@ impl CamDocument {
         Ok(entities)
     }
 
+    /// Creates a wireframe entity an interactive tool completed, on the active level's
+    /// construction plane. Returns how many entities were added.
+    ///
+    /// The entity is built from the exact points the user clicked or typed, so a line is a line
+    /// of the sketch ([`Sketch::add_line`]) and an arc a real [`Sketch::add_arc`] — nothing is
+    /// approximated by a polyline. A point that is not on the level's construction plane is
+    /// refused rather than silently flattened onto it.
+    pub fn create_wire(&mut self, wire: PendingWire) -> Result<usize, CamError> {
+        let level = self.active_level;
+        let index = self.sketch_index(level);
+        let plane = self.sketches[index].plane;
+        for at in wire.points() {
+            if !at.is_finite() || plane.height(at).abs() > POINT_TOLERANCE {
+                return Err(CamError::Invalid(format!(
+                    "the point ({:.3}, {:.3}, {:.3}) is not on level {level}'s {} construction plane",
+                    at.x,
+                    at.y,
+                    at.z,
+                    plane_name(plane)
+                )));
+            }
+        }
+        let refused = |error: solidcraft_sketch::SketchError| CamError::Sketch(error.to_string());
+        let sketch = &mut self.sketches[index].sketch;
+        match wire {
+            PendingWire::Point { at } => {
+                sketch.add_point(plane.to_local(at), None).map_err(refused)?;
+            }
+            PendingWire::Line { start, end } => {
+                if start.dist(end) <= POINT_TOLERANCE {
+                    return Err(CamError::Invalid("a line needs two distinct points".into()));
+                }
+                sketch.add_line(plane.to_local(start), plane.to_local(end), None, None, None).map_err(refused)?;
+            }
+            PendingWire::Arc { start, end, through } => {
+                let (centre, from, to) = arc_through(plane.to_local(start), plane.to_local(end), plane.to_local(through))
+                    .ok_or_else(|| CamError::Invalid("the three points do not define an arc".into()))?;
+                sketch.add_arc(centre, from, to, [None; 3], None).map_err(refused)?;
+            }
+        }
+        self.register_curves(index);
+        self.count_entities(level, 1);
+        self.revision += 1;
+        Ok(1)
+    }
+
     /// Runs one solid modeling tool on the document.
-    pub fn solid(&mut self, tool: SolidTool) -> Result<usize, CamError> {
-        match tool {
+    pub fn solid(&mut self, tool: SolidTool) -> Result<usize, CamError> {        match tool {
             SolidTool::Extrude => self.extrude(DEFAULT_EXTRUDE_DEPTH),
             SolidTool::Revolve => self.revolve(DEFAULT_REVOLVE_ANGLE),
             SolidTool::BooleanCut => self.boolean(BoolOp::Cut),
@@ -794,6 +847,31 @@ fn shape_origin(index: usize) -> Vec2 {
     Vec2::new(10.0 + SHAPE_SPACING * column as f64, 10.0 + SHAPE_SPACING * row as f64)
 }
 
+/// The circle through three plane points, as the sketch's counter-clockwise arc: `(centre,
+/// start, end)`. The ends swap when the arc runs the other way round, so the same piece of the
+/// circle is drawn either side of the chord. `None` when the points do not define one.
+fn arc_through(start: Vec2, end: Vec2, through: Vec2) -> Option<(Vec2, Vec2, Vec2)> {
+    // The circumcentre of the triangle, as in the preview: half the determinant, then the
+    // perpendicular-bisector solution.
+    let d = 2.0 * (start.x * (end.y - through.y) + end.x * (through.y - start.y) + through.x * (start.y - end.y));
+    if !d.is_finite() || d.abs() <= 1e-12 {
+        return None;
+    }
+    let (a2, b2, t2) = (start.len2(), end.len2(), through.len2());
+    let centre = Vec2::new(
+        (a2 * (end.y - through.y) + b2 * (through.y - start.y) + t2 * (start.y - end.y)) / d,
+        (a2 * (through.x - end.x) + b2 * (start.x - through.x) + t2 * (end.x - start.x)) / d,
+    );
+    if !centre.x.is_finite() || !centre.y.is_finite() || !(centre.dist(start) > POINT_TOLERANCE) {
+        return None;
+    }
+    let turn = std::f64::consts::TAU;
+    let angle = |point: Vec2| (point - centre).angle().rem_euclid(turn);
+    let (from, to, via) = (angle(start), angle(end), angle(through));
+    let (forward, through_forward) = ((to - from).rem_euclid(turn), (via - from).rem_euclid(turn));
+    if through_forward <= forward { Some((centre, start, end)) } else { Some((centre, end, start)) }
+}
+
 /// Draws one wireframe shape into `sketch` at `origin`.
 fn draw_shape(sketch: &mut Sketch, tool: WireTool, origin: Vec2) -> Result<(), CamError> {
     let refused = |error: solidcraft_sketch::SketchError| CamError::Sketch(error.to_string());
@@ -1035,6 +1113,59 @@ mod tests {
         let mut document = CamDocument::default();
         let error = document.import_dxf("0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n", "empty.dxf");
         assert!(error.is_err());
+    }
+
+    #[test]
+    fn an_interactively_placed_entity_lands_on_the_active_level() {
+        let mut document = CamDocument::default();
+        let (start, end) = (Vec3::new(0.0, 0.0, 0.0), Vec3::new(20.0, 10.0, 0.0));
+        assert_eq!(document.create_wire(PendingWire::Line { start, end }), Ok(1));
+        assert_eq!(document.level(1).map(|level| level.entity_count), Some(1));
+        let wires = document.wireframe_lines();
+        assert_eq!(wires.len(), 1);
+        assert!(wires[0].points.first().is_some_and(|point| point.dist(start) < 1e-9));
+        assert!(wires[0].points.last().is_some_and(|point| point.dist(end) < 1e-9));
+        let revision = document.revision();
+        assert_eq!(document.create_wire(PendingWire::Point { at: Vec3::new(5.0, 5.0, 0.0) }), Ok(1));
+        assert!(document.revision() > revision, "the commit redraws the viewport");
+        assert_eq!(document.chain_entities().len(), 1, "the line is a chainable entity of its own");
+    }
+
+    #[test]
+    fn an_interactively_placed_arc_is_a_real_sketch_arc() {
+        let mut document = CamDocument::default();
+        let wire = PendingWire::Arc { start: Vec3::ZERO, end: Vec3::new(10.0, 0.0, 0.0), through: Vec3::new(5.0, 5.0, 0.0) };
+        assert_eq!(document.create_wire(wire), Ok(1));
+        let wires = document.wireframe_lines();
+        assert_eq!(wires.len(), 1);
+        let points = &wires[0].points;
+        assert!(points.len() > 3, "an arc is tessellated into a curve, not drawn as its chord");
+        // The sketch's arc is counter-clockwise, so which end it starts at depends on the way
+        // round the three points go; both ends are still the two clicked endpoints.
+        let ends = [points[0], points[points.len() - 1]];
+        for end in [Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0)] {
+            assert!(ends.iter().any(|point| point.dist(end) < 1e-6), "the arc ends on {end:?}, got {ends:?}");
+        }
+        assert!(points.iter().all(|point| point.z.abs() < 1e-9), "the arc stays on the level's plane");
+        // The three points sit on one circle: the arc the tool previewed is the arc committed.
+        let centre = Vec3::new(5.0, 0.0, 0.0);
+        assert!(points.iter().all(|point| (point.dist(centre) - 5.0).abs() < 1e-6), "the arc is the circle through the typed points");
+    }
+
+    #[test]
+    fn a_commit_off_the_levels_plane_is_refused() {
+        let mut document = CamDocument::default();
+        let off_plane = PendingWire::Line { start: Vec3::ZERO, end: Vec3::new(0.0, 0.0, 5.0) };
+        assert!(matches!(document.create_wire(off_plane), Err(CamError::Invalid(_))));
+        assert!(document.wireframe_lines().is_empty(), "nothing was flattened onto the plane");
+        assert!(matches!(
+            document.create_wire(PendingWire::Line { start: Vec3::ZERO, end: Vec3::ZERO }),
+            Err(CamError::Invalid(_))
+        ));
+        assert!(matches!(
+            document.create_wire(PendingWire::Point { at: Vec3::new(f64::NAN, 0.0, 0.0) }),
+            Err(CamError::Invalid(_))
+        ));
     }
 
     #[test]

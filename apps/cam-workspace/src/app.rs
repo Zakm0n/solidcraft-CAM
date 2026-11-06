@@ -14,8 +14,9 @@ use solidcraft_cam::tool::ToolLibrary;
 use solidcraft_cam::toolpath::Toolpath;
 
 use crate::dialogs_cam::{Contour2DDialog, Contour2DOutcome, StockOutcome, StockSetupDialog, ToolLibraryDialog, ToolLibraryOutcome};
-use crate::document::{CamDocument, ImportSummary, SolidTool, WireTool};
+use crate::document::{CamDocument, ImportSummary, SolidTool, WireTool, standard_plane};
 use crate::files::{self, Picked};
+use crate::interactive_geom::PendingWire;
 use crate::left_manager::{LeftManager, ManagerAction};
 use crate::ribbon::{Command, ImportKind, Ribbon, RibbonTab, SimulationCommand, ViewCommand};
 use crate::simulation_panel::{self, SimulationAction};
@@ -481,6 +482,14 @@ impl CamWorkspaceApp {
                 self.regenerate_operation(index);
             }
             ManagerAction::ToggleOperationVisibility(index) => self.toggle_operation_visibility(index),
+            ManagerAction::CommitWire => match self.viewport.commit_cursor() {
+                Some(wire) => self.commit_wire(wire),
+                None => self.status = "Create: point at a position in the viewport first".to_string(),
+            },
+            ManagerAction::CancelWireTool => {
+                self.viewport.cancel_wireframe_tool();
+                self.status = "Tool cancelled".to_string();
+            }
         }
     }
 
@@ -499,13 +508,32 @@ impl CamWorkspaceApp {
         self.stock_setup = Some(StockSetupDialog::new(&self.document));
     }
 
-    /// Draws a wireframe shape on the active level and reports what landed.
+    /// Starts a clicking wireframe tool on the active construction plane, and reports that the
+    /// next clicks place it; the fixed-size tools draw at once.
     fn run_draw(&mut self, tool: WireTool) {
+        let plane = standard_plane(self.document.active_plane());
+        if self.viewport.begin_wireframe_tool(tool, plane) {
+            self.status = format!("{}: click points on the {} plane, or type them in the tool panel", tool.label(), self.document.active_plane_name());
+            return;
+        }
         let level = self.document.active_level();
         match self.document.draw(tool) {
             Ok(added) => {
                 let noun = if added == 1 { "entity" } else { "entities" };
                 self.status = format!("{}: added {added} {noun} to level {level}", tool.label());
+            }
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    /// Creates a wireframe entity the interactive tool completed on the active level, and
+    /// reports what landed.
+    fn commit_wire(&mut self, wire: PendingWire) {
+        let level = self.document.active_level();
+        match self.document.create_wire(wire) {
+            Ok(added) => {
+                let noun = if added == 1 { "entity" } else { "entities" };
+                self.status = format!("{}: added {added} {noun} to level {level}", wire.label());
             }
             Err(error) => self.status = error.to_string(),
         }
@@ -568,7 +596,7 @@ impl CamWorkspaceApp {
             .min_size(LEFT_PANEL_MIN_WIDTH)
             .max_size(LEFT_PANEL_MAX_WIDTH)
             .show(ui, |ui| {
-                action = self.manager.ui(ui, &mut self.document, &self.operations, &self.tools);
+                action = self.manager.ui(ui, &mut self.document, &self.operations, &self.tools, &mut self.viewport.interactive);
             });
         if let Some(action) = action {
             self.run_manager(action);
@@ -723,9 +751,15 @@ impl CamWorkspaceApp {
         self.manager_panel(ui);
 
         // Last, so that it fills what the panels leave over: the live 3D viewport.
+        let mut completed = Vec::new();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(VIEWPORT_BACKGROUND)).show(ui, |ui| {
-            self.viewport.ui(ui, &self.document, &self.operations, Some(&self.simulation));
+            completed = self.viewport.ui(ui, &self.document, &self.operations, Some(&self.simulation));
         });
+        // A click that finished a wireframe entity creates it after the frame is drawn, so the
+        // document is not borrowed while the viewport paints it.
+        for wire in completed {
+            self.commit_wire(wire);
+        }
         self.import_dialog(ui);
         self.show_tool_library(ui);
         self.show_stock_setup(ui);
@@ -768,6 +802,25 @@ impl eframe::App for CamWorkspaceApp {
 mod tests {
     use super::*;
     use crate::left_manager::ManagerTab;
+
+    #[test]
+    fn a_click_that_finishes_a_line_creates_it_in_the_document() {
+        use solidcore_record::Vec3;
+
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        app.run(Command::Draw(WireTool::Line));
+        assert!(app.viewport.interactive.is_active(), "the Line tool waits for clicks instead of drawing at once");
+        assert!(app.status().starts_with("Line: click points"), "status: {}", app.status());
+        app.viewport.interactive.track_point(Vec3::ZERO);
+        assert!(app.viewport.place_point().is_none(), "the first click anchors the line");
+        app.viewport.interactive.track_point(Vec3::new(30.0, 0.0, 0.0));
+        let wire = app.viewport.place_point().expect("the second click completes the line");
+        app.commit_wire(wire);
+        assert_eq!(app.status(), "Line: added 1 entity to level 1");
+        assert_eq!(app.document.chain_entities().len(), 1, "the line is real document geometry");
+        assert!(app.viewport.interactive.is_active(), "the tool stays live for the next line");
+    }
 
     #[test]
     fn a_command_reports_its_result_in_the_status_bar() {

@@ -12,6 +12,7 @@ use solidcraft_cam::operations::Operation;
 use solidcraft_cam::tool::ToolLibrary;
 
 use crate::document::CamDocument;
+use crate::interactive_geom::{DimensionField, InteractiveGeometry};
 
 pub use crate::document::{Level, STANDARD_PLANES};
 
@@ -36,6 +37,12 @@ const ENTITY_WIDTH: f32 = 52.0;
 
 /// Width of a toolpath node's Regenerate button, in points.
 const REGENERATE_WIDTH: f32 = 82.0;
+
+/// Width of one AutoCursor input field, in points: enough for a coordinate with a decimal.
+const FIELD_WIDTH: f32 = 62.0;
+
+/// The outline of a field that does not hold a number: the warning red the shell uses.
+pub const WARNING: Color32 = Color32::from_rgb(190, 60, 40);
 
 /// The highlight behind an active tab and the row it selects, in the light theme: a subtle blue
 /// that reads as "current" without competing with the model.
@@ -118,23 +125,42 @@ pub enum ManagerAction {
     RegenerateOperation(usize),
     /// Show or hide the toolpath of the operation at this index.
     ToggleOperationVisibility(usize),
+    /// Create the wireframe entity the live tool is showing, as a click would.
+    CommitWire,
+    /// End the live clicking wireframe tool.
+    CancelWireTool,
 }
 
 /// The unified left manager: its tab strip and the view over the document.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LeftManager {
     /// The tab whose view the panel shows.
     pub tab: ManagerTab,
+    /// The AutoCursor fields' text as typed, one per [`DimensionField::ALL`] entry: a text
+    /// buffer lives with the panel so typing a value is not overwritten by the number it
+    /// parses to. A new tool starts with empty fields.
+    fields: [String; 5],
+    /// Whether a clicking tool was live when the panel last drew.
+    tool_was_live: bool,
 }
 
 impl LeftManager {
-    /// The manager panel's contents: the tab strip and the active view under it.
+    /// The manager panel's contents: the live tool's AutoCursor fields, the tab strip and the
+    /// active view under it.
     ///
     /// The toolpaths view lists what `operations` hold and selects tools by `tools`; the other
-    /// views read the document. The returned action is what a button asked for, for the
-    /// application to run after the panel has been drawn.
-    pub fn ui(&mut self, ui: &mut egui::Ui, document: &mut CamDocument, operations: &[Operation], tools: &ToolLibrary) -> Option<ManagerAction> {
-        let mut action = None;
+    /// views read the document. `interactive` is the viewport's live wireframe tool, whose
+    /// typed dimensions the tool panel edits. The returned action is what a button asked for,
+    /// for the application to run after the panel has been drawn.
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        document: &mut CamDocument,
+        operations: &[Operation],
+        tools: &ToolLibrary,
+        interactive: &mut InteractiveGeometry,
+    ) -> Option<ManagerAction> {
+        let mut action = self.tool_panel(ui, interactive);
         ui.horizontal_wrapped(|ui| {
             for tab in ManagerTab::ALL {
                 ui.selectable_value(&mut self.tab, tab, tab.label());
@@ -145,11 +171,93 @@ impl LeftManager {
         // the panel collapsing around a short list.
         ScrollArea::vertical().id_salt("left_manager_scroll").auto_shrink([false, false]).show(ui, |ui| match self.tab {
             ManagerTab::Levels => Self::levels_view(ui, document),
-            ManagerTab::Toolpaths => action = Self::toolpaths_view(ui, operations, tools),
+            ManagerTab::Toolpaths => action = action.or_else(|| Self::toolpaths_view(ui, operations, tools)),
             ManagerTab::Planes => Self::planes_view(ui, document),
             ManagerTab::Solids => Self::solids_view(ui, document),
         });
         action
+    }
+
+    /// The active tool panel: the AutoCursor fields that lock the next point, and the buttons
+    /// that create the entity or end the function.
+    ///
+    /// A field left empty follows the pointer; one holding a number locks that dimension of the
+    /// rubber band, exactly as typing it into the reference product's cursor does.
+    fn tool_panel(&mut self, ui: &mut egui::Ui, interactive: &mut InteractiveGeometry) -> Option<ManagerAction> {
+        // A tool that just started gets empty fields, so a value typed for the last function
+        // does not silently bind the next one.
+        let live = interactive.is_active();
+        if live && !self.tool_was_live {
+            self.fields = std::array::from_fn(|_| String::new());
+        }
+        self.tool_was_live = live;
+        if !live {
+            return None;
+        }
+        let mut action = None;
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(2, 2)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{} tool", interactive.tool().label())).strong());
+                let can_create = interactive.cursor().is_some();
+                if ui
+                    .add_enabled(can_create, egui::Button::new("Create").small())
+                    .on_hover_text("Create this entity on the active level (Enter in a field also places it)")
+                    .clicked()
+                {
+                    action = Some(ManagerAction::CommitWire);
+                }
+                if ui.small_button("Cancel").on_hover_text("End the function (Escape)").clicked() {
+                    action = Some(ManagerAction::CancelWireTool);
+                }
+            });
+            egui::Grid::new("cam_tool_fields").num_columns(4).spacing([6.0, 3.0]).show(ui, |ui| {
+                for (index, field) in DimensionField::ALL.into_iter().enumerate() {
+                    if Self::dimension_editor(ui, interactive, field, &mut self.fields[index]) {
+                        action = Some(ManagerAction::CommitWire);
+                    }
+                    if index % 2 == 1 {
+                        ui.end_row();
+                    }
+                }
+                // The last row has one empty cell: the grid keeps its columns aligned.
+                ui.label("");
+                ui.label("");
+                ui.end_row();
+            });
+            ui.label(RichText::new("Empty fields follow the pointer; a number locks that dimension.").weak().small());
+        });
+        action
+    }
+
+    /// One AutoCursor field: its label, the typed text, and the unit it is measured in. Returns
+    /// whether Enter asked for the point to be created, so a value can be typed and placed
+    /// without reaching for the mouse.
+    fn dimension_editor(ui: &mut egui::Ui, interactive: &mut InteractiveGeometry, field: DimensionField, text: &mut String) -> bool {
+        // A value set from outside the panel (a test, or a workflow that fills the field) appears
+        // in it too: the text mirrors the dimension until the user types over it.
+        if text.trim().is_empty()
+            && let Some(value) = field.get(&interactive.dimensions())
+        {
+            *text = format!("{value:.3}");
+        }
+        ui.label(field.label());
+        let response = ui.add(
+            egui::TextEdit::singleline(text)
+                .desired_width(FIELD_WIDTH)
+                .hint_text("—")
+                .align(egui::Align2::LEFT_CENTER),
+        );
+        let typed = text.trim();
+        let parsed = if typed.is_empty() { None } else { typed.parse::<f64>().ok() };
+        let invalid = !typed.is_empty() && parsed.is_none();
+        if invalid {
+            ui.painter().rect_stroke(response.rect, 2.0, egui::Stroke::new(1.0, WARNING), egui::StrokeKind::Inside);
+        } else if response.changed() {
+            interactive.set_dimension(field, parsed);
+        }
+        let enter = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        ui.label(RichText::new(field.unit()).weak().small());
+        enter
     }
 
     /// The `Levels` view: the level table, a new-level button and the level count.
@@ -364,6 +472,55 @@ fn empty_state(ui: &mut egui::Ui, text: &str) {
 mod tests {
     use super::*;
     use crate::document::WireTool;
+
+    /// Every string a frame drew, nested shape groups included.
+    fn drawn_text(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        fn collect(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                egui::Shape::Vec(items) => items.iter().for_each(|item| collect(item, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in shapes {
+            collect(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// Draws the manager once with `interactive` live, and returns the text of the frame.
+    fn draw_manager(manager: &mut LeftManager, document: &mut CamDocument, interactive: &mut InteractiveGeometry) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let tools = ToolLibrary::with_presets();
+        let mut out = ctx.run_ui(
+            egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 700.0))), ..Default::default() },
+            |ui| {
+                manager.ui(ui, document, &[], &tools, interactive);
+            },
+        );
+        // No renderer here: the texture uploads are dropped rather than applied.
+        out.textures_delta.clear();
+        drawn_text(&out.shapes)
+    }
+
+    #[test]
+    fn a_live_tool_shows_its_autocursor_fields() {
+        let mut manager = LeftManager::default();
+        let mut document = CamDocument::default();
+        let mut interactive = InteractiveGeometry::default();
+        let idle = draw_manager(&mut manager, &mut document, &mut interactive);
+        assert!(!idle.iter().any(|text| text == "Length"), "no tool, no fields: {idle:?}");
+
+        assert!(interactive.begin(WireTool::Line, solidcore_record::Plane::XY));
+        let live = draw_manager(&mut manager, &mut document, &mut interactive);
+        for label in ["X", "Y", "Z", "Length", "Angle"] {
+            assert!(live.iter().any(|text| text == label), "the tool panel shows {label}: {live:?}");
+        }
+        assert!(live.iter().any(|text| text.contains("Line tool")), "the panel names the live tool: {live:?}");
+        assert!(live.iter().any(|text| text == "Create"));
+        assert!(manager.tool_was_live);
+    }
 
     #[test]
     fn the_tab_strip_lists_the_four_manager_views_in_order() {
