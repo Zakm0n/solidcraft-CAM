@@ -11,14 +11,15 @@
 //! Positions are picked with the same detection order the reference product documents for its
 //! cursor: point entities first, then the endpoints of curves, then their midpoints, then arc
 //! quadrants and centres, then real curve intersections, then the grid. That picking and the
-//! typed fields feed this machine from outside; this module owns only the state — when a click
-//! anchors a point, when the entity is complete, and what the completed entity is. Drawing the
-//! rubber-band preview and creating the geometry in the document are separate jobs.
+//! typed fields feed this machine from outside; this module owns the state — when a click
+//! anchors a point, when the entity is complete, what the completed entity is — and the document
+//! features a pointer snaps to. Painting the rubber-band preview and creating the geometry in the
+//! document are the viewport's and the engine's jobs.
 
-use solidcore_record::{Plane, Vec3};
-use solidcraft_geom::{PlaneGeom, Vec3Geom};
+use solidcore_record::{Plane, Vec2, Vec3};
+use solidcraft_geom::{PlaneGeom, Vec2Geom, Vec3Geom};
 
-use crate::document::WireTool;
+use crate::document::{CamDocument, WireTool};
 
 /// Distance below which two positions are the same point, in document units. A line or an arc
 /// needs two distinct ends, and an arc's third point must leave the chord by more than this.
@@ -27,6 +28,110 @@ pub const POINT_TOLERANCE: f64 = 0.001;
 /// The screen-space reach of a position pick, in logical pixels: a click within this distance of
 /// a snap candidate takes the candidate instead of the point under the cursor.
 pub const PICK_RADIUS_PIXELS: f32 = 8.0;
+
+/// The screen-space reach of a snap, in logical pixels: a pointer within this distance of a
+/// document vertex takes that vertex as the position under the cursor.
+pub const SNAP_RADIUS_PIXELS: f32 = PICK_RADIUS_PIXELS;
+
+/// How many straight segments the preview of an arc is drawn with: one every 7.5 degrees.
+pub const ARC_PREVIEW_SEGMENTS: usize = 48;
+
+/// How close every point of a tessellated curve must lie to one circle, relative to its radius,
+/// for that circle's centre to count as the curve's centre.
+const CENTRE_TOLERANCE: f64 = 1e-6;
+
+/// The kinds of document feature a pointer can snap to, in the order a tie prefers them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapKind {
+    /// The end of a curve: a square marker.
+    Endpoint,
+    /// The middle of a curve segment: a triangle marker.
+    Midpoint,
+    /// The centre of a circle or an arc: a circle marker.
+    Centre,
+}
+
+impl SnapKind {
+    /// How strongly the kind claims the pointer when two candidates are the same distance away:
+    /// a lower number wins.
+    pub const fn priority(self) -> u8 {
+        match self {
+            Self::Endpoint => 0,
+            Self::Midpoint => 1,
+            Self::Centre => 2,
+        }
+    }
+}
+
+/// One document feature a pointer can snap to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SnapCandidate {
+    /// What the feature is, which decides the marker drawn over it.
+    pub kind: SnapKind,
+    /// Where the feature is, in world coordinates.
+    pub at: Vec3,
+}
+
+/// Every feature of the document's visible wireframe a pointer may snap to: the ends and segment
+/// midpoints of each curve, and the centre of each curve that is a whole circle or an arc.
+///
+/// The curves are the exact sketch geometry, tessellated only for this search: the vertices are
+/// the same points the viewport draws the wireframe from.
+pub fn snap_candidates(document: &CamDocument) -> Vec<SnapCandidate> {
+    let mut candidates = Vec::new();
+    for wire in document.wireframe_lines() {
+        let points = wire.points;
+        let (Some(first), Some(last)) = (points.first().copied(), points.last().copied()) else { continue };
+        candidates.push(SnapCandidate { kind: SnapKind::Endpoint, at: first });
+        if last.dist(first) > POINT_TOLERANCE {
+            candidates.push(SnapCandidate { kind: SnapKind::Endpoint, at: last });
+        }
+        for pair in points.windows(2) {
+            candidates.push(SnapCandidate { kind: SnapKind::Midpoint, at: pair[0].lerp(pair[1], 0.5) });
+        }
+        if let Some(at) = curve_centre(&points) {
+            candidates.push(SnapCandidate { kind: SnapKind::Centre, at });
+        }
+    }
+    candidates
+}
+
+/// The centre of the circle that every one of `points` lies on, when they lie on one: the centre
+/// of a drawn circle or arc. `None` for a straight run of points or a free-form curve.
+fn curve_centre(points: &[Vec3]) -> Option<Vec3> {
+    if points.len() < 3 {
+        return None;
+    }
+    // Three points spread around the curve, so a closed curve whose last point repeats its first
+    // still gives a triangle to take the centre from.
+    let (a, b, c) = (points[0], points[points.len() / 3], points[(points.len() * 2) / 3]);
+    let u = b - a;
+    let v = c - a;
+    let normal = u.cross(v);
+    let span = normal.len();
+    if !(span > POINT_TOLERANCE) || !normal.is_finite() {
+        return None;
+    }
+    // Work in the plane's own frame, with `a` at the origin and `b` on the first axis.
+    let x_axis = u.normalized()?;
+    let y_axis = normal.cross(x_axis) / span;
+    let (bx, cy) = (u.len(), v.dot(y_axis));
+    if !(cy.abs() > POINT_TOLERANCE) {
+        return None;
+    }
+    let (ox, oy) = (bx / 2.0, ((v.dot(x_axis) * v.dot(x_axis)) + cy * cy - bx * v.dot(x_axis)) / (2.0 * cy));
+    let centre = a + x_axis * ox + y_axis * oy;
+    let radius = ox.hypot(oy);
+    if !centre.is_finite() || !(radius > POINT_TOLERANCE) {
+        return None;
+    }
+    // A free-form curve only passes near a circle; a drawn one lies exactly on it.
+    let on_circle = points.iter().all(|point| {
+        let distance = point.dist(centre);
+        distance.is_finite() && (distance - radius).abs() <= CENTRE_TOLERANCE * radius
+    });
+    on_circle.then_some(centre)
+}
 
 /// Whether the tool is waiting for its first point at all.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -152,12 +257,14 @@ pub struct InteractiveGeometry {
     plane: Plane,
     /// The last position the pointer projected to on `plane`, if it was over it.
     hover: Option<Vec3>,
+    /// The document feature the pointer has snapped to, if any.
+    snap: Option<SnapCandidate>,
 }
 
 impl Default for InteractiveGeometry {
     /// Nothing is live, and positions land on the TOP plane.
     fn default() -> Self {
-        Self { tool: WireframeTool::None, plane: Plane::XY, hover: None }
+        Self { tool: WireframeTool::None, plane: Plane::XY, hover: None, snap: None }
     }
 }
 
@@ -187,9 +294,39 @@ impl InteractiveGeometry {
         self.hover
     }
 
+    /// The document feature the pointer has snapped to this frame, if any.
+    pub const fn snap(&self) -> Option<SnapCandidate> {
+        self.snap
+    }
+
     /// How many points the live tool has anchored so far.
     pub const fn placed_points(&self) -> usize {
         self.tool.placed_points()
+    }
+
+    /// The positions the live tool has anchored, in the order it took them.
+    pub fn anchors(&self) -> Vec<Vec3> {
+        match self.tool {
+            WireframeTool::None | WireframeTool::Point(_) => Vec::new(),
+            WireframeTool::Line(state) => state.p1.into_iter().collect(),
+            WireframeTool::Arc(state) => state.p1.into_iter().chain(state.p2).collect(),
+        }
+    }
+
+    /// The live tool's rubber band in world coordinates: one polyline per preview curve, running
+    /// from the anchored point to the pointer, with `arc_segments` straight pieces in an arc.
+    /// The point tool has no band — the viewport draws its cursor instead.
+    pub fn preview(&self, arc_segments: usize) -> Vec<Vec<Vec3>> {
+        match self.tool {
+            WireframeTool::None | WireframeTool::Point(_) => Vec::new(),
+            WireframeTool::Line(state) => state.p1.map(|start| vec![vec![start, state.current_pos]]).unwrap_or_default(),
+            WireframeTool::Arc(state) => match (state.p1, state.p2) {
+                (Some(start), Some(end)) => arc_preview_points(start, end, state.current_pos, self.plane, arc_segments)
+                    .map_or_else(|| vec![vec![start, end]], |arc| vec![arc]),
+                (Some(start), None) => vec![vec![start, state.current_pos]],
+                (None, _) => Vec::new(),
+            },
+        }
     }
 
     /// Makes `tool` the live clicking tool on `plane`, dropping any points already anchored.
@@ -243,12 +380,23 @@ impl InteractiveGeometry {
             return;
         }
         self.hover = Some(at);
+        self.snap = None;
         self.tool.track(at);
+    }
+
+    /// Snaps the pointer to `snap`, or leaves it at the projected point when there is none: the
+    /// rubber band ends on the candidate, so the anchor a click would take is the one drawn.
+    pub fn set_snap(&mut self, snap: Option<SnapCandidate>) {
+        if let Some(snap) = snap {
+            self.track_point(snap.at);
+        }
+        self.snap = snap;
     }
 
     /// Forgets the pointer position, once it leaves the viewport.
     pub fn clear_hover(&mut self) {
         self.hover = None;
+        self.snap = None;
     }
 
     /// Places one point of the live tool at `at`, and reports what that did.
@@ -333,6 +481,48 @@ pub fn arc_is_defined(start: Vec3, end: Vec3, through: Vec3) -> bool {
     }
     // The distance from the third point to the chord's line: |chord × leg| / |chord|.
     chord.cross(through - start).len() / length > POINT_TOLERANCE
+}
+
+/// The points of the arc that runs from `start` to `end` through `through`, on `plane`, sampled
+/// as `segments` straight pieces. `None` when the three points do not define an arc.
+pub fn arc_preview_points(start: Vec3, end: Vec3, through: Vec3, plane: Plane, segments: usize) -> Option<Vec<Vec3>> {
+    if !arc_is_defined(start, end, through) {
+        return None;
+    }
+    let (a, b, t) = (plane.to_local(start), plane.to_local(end), plane.to_local(through));
+    // The circumcentre of the triangle in the plane: the centre of the arc's circle.
+    let d = 2.0 * (a.x * (b.y - t.y) + b.x * (t.y - a.y) + t.x * (a.y - b.y));
+    if !d.is_finite() || d.abs() <= POINT_TOLERANCE {
+        return None;
+    }
+    let (aa, bb, tt) = (a.len2(), b.len2(), t.len2());
+    let centre = Vec2::new(
+        (aa * (b.y - t.y) + bb * (t.y - a.y) + tt * (a.y - b.y)) / d,
+        (aa * (t.x - b.x) + bb * (a.x - t.x) + tt * (b.x - a.x)) / d,
+    );
+    let radius = centre.dist(a);
+    if !centre.x.is_finite() || !centre.y.is_finite() || !(radius > POINT_TOLERANCE) {
+        return None;
+    }
+    // Sweep the short way or the long way round, whichever passes through the third point.
+    let turn = std::f64::consts::TAU;
+    let angle = |point: Vec2| (point - centre).angle().rem_euclid(turn);
+    let (from, to, via) = (angle(a), angle(b), angle(t));
+    let forward = (to - from).rem_euclid(turn);
+    let through_forward = (via - from).rem_euclid(turn);
+    let sweep = if through_forward <= forward { forward } else { forward - turn };
+    if !sweep.is_finite() || sweep.abs() <= 1e-9 {
+        return None;
+    }
+    let steps = segments.max(2);
+    Some(
+        (0..=steps)
+            .map(|step| {
+                let angle = from + sweep * (step as f64 / steps as f64);
+                plane.to_world(centre + Vec2::new(radius * angle.cos(), radius * angle.sin()))
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -484,5 +674,84 @@ mod tests {
         geometry.track_point(Vec3::new(3.0, 4.0, 0.0));
         assert!(geometry.begin(WireTool::Line, Plane::XY));
         assert_eq!(geometry.tool().current_pos(), Some(Vec3::new(3.0, 4.0, 0.0)));
+    }
+
+    #[test]
+    fn a_snap_takes_the_pointer_and_the_band_to_the_candidate() {
+        let mut geometry = line_tool();
+        assert!(matches!(geometry.click(Vec3::ZERO), ClickOutcome::Progress));
+        let snap = SnapCandidate { kind: SnapKind::Endpoint, at: Vec3::new(25.0, 5.0, 0.0) };
+        geometry.track_point(Vec3::new(24.0, 6.0, 0.0));
+        geometry.set_snap(Some(snap));
+        assert_eq!(geometry.snap(), Some(snap));
+        assert_eq!(geometry.hover(), Some(snap.at), "the pointer sits on the snap, not beside it");
+        assert_eq!(geometry.preview(ARC_PREVIEW_SEGMENTS), vec![vec![Vec3::ZERO, snap.at]], "the rubber band ends on the snap");
+        geometry.track_point(Vec3::new(23.0, 7.0, 0.0));
+        assert_eq!(geometry.snap(), None, "moving the pointer off the candidate drops the snap");
+    }
+
+    #[test]
+    fn the_line_rubber_band_runs_from_its_anchor_to_the_pointer() {
+        let mut geometry = line_tool();
+        assert!(geometry.preview(ARC_PREVIEW_SEGMENTS).is_empty(), "a line with no anchor has no band");
+        let start = Vec3::new(5.0, 5.0, 0.0);
+        assert!(matches!(geometry.click(start), ClickOutcome::Progress));
+        let pointer = Vec3::new(35.0, 12.0, 0.0);
+        geometry.track_point(pointer);
+        assert_eq!(geometry.preview(ARC_PREVIEW_SEGMENTS), vec![vec![start, pointer]]);
+        assert_eq!(geometry.anchors(), vec![start]);
+    }
+
+    #[test]
+    fn the_arc_rubber_band_bends_through_the_pointer() {
+        let mut geometry = arc_tool();
+        let (start, end) = (Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0));
+        assert!(matches!(geometry.click(start), ClickOutcome::Progress));
+        geometry.track_point(end);
+        assert_eq!(geometry.preview(ARC_PREVIEW_SEGMENTS), vec![vec![start, end]], "two anchors preview the chord");
+        assert!(matches!(geometry.click(end), ClickOutcome::Progress));
+        let through = Vec3::new(5.0, 5.0, 0.0);
+        geometry.track_point(through);
+        let preview = geometry.preview(ARC_PREVIEW_SEGMENTS);
+        assert_eq!(preview.len(), 1);
+        let points = &preview[0];
+        assert_eq!(points.len(), ARC_PREVIEW_SEGMENTS + 1);
+        assert!(points[0].dist(start) < 1e-9 && points[points.len() - 1].dist(end) < 1e-9, "the arc starts and ends on its anchors");
+        assert!(points.iter().any(|point| point.dist(through) < 1e-9), "the arc passes through the pointer");
+        assert!(points.iter().all(|point| point.z.abs() < 1e-9), "the arc stays on the TOP plane");
+    }
+
+    #[test]
+    fn an_arc_through_its_own_endpoints_has_no_preview() {
+        assert!(arc_preview_points(Vec3::ZERO, Vec3::ZERO, Vec3::new(1.0, 1.0, 0.0), Plane::XY, 16).is_none());
+        assert!(arc_preview_points(Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0), Vec3::new(4.0, 0.0, 0.0), Plane::XY, 16).is_none());
+    }
+
+    #[test]
+    fn snap_candidates_are_the_curves_ends_midpoints_and_centres() {
+        let mut document = CamDocument::default();
+        document.draw(WireTool::Rectangle).expect("the rectangle draws on a new document");
+        let candidates = snap_candidates(&document);
+        let corners = [Vec3::new(10.0, 10.0, 0.0), Vec3::new(50.0, 10.0, 0.0), Vec3::new(50.0, 40.0, 0.0), Vec3::new(10.0, 40.0, 0.0)];
+        for corner in corners {
+            assert!(
+                candidates.iter().any(|candidate| candidate.kind == SnapKind::Endpoint && candidate.at.dist(corner) < 1e-9),
+                "the rectangle's corner {corner:?} is a snap"
+            );
+        }
+        assert!(
+            candidates.iter().any(|candidate| candidate.kind == SnapKind::Midpoint && candidate.at.dist(Vec3::new(30.0, 10.0, 0.0)) < 1e-9),
+            "the bottom edge's midpoint is a snap"
+        );
+        assert!(!candidates.iter().any(|candidate| candidate.kind == SnapKind::Centre), "a rectangle's four separate edges have no centre");
+
+        let mut document = CamDocument::default();
+        document.draw(WireTool::Circle).expect("the circle draws on a new document");
+        let candidates = snap_candidates(&document);
+        let centre = Vec3::new(30.0, 25.0, 0.0);
+        assert!(
+            candidates.iter().any(|candidate| candidate.kind == SnapKind::Centre && candidate.at.dist(centre) < 1e-6),
+            "the circle's centre is a snap"
+        );
     }
 }

@@ -8,14 +8,15 @@
 #[path = "support/raster.rs"]
 mod raster;
 
-use cam_workspace::app::{CamWorkspaceApp, LEFT_PANEL_MIN_WIDTH, LEFT_PANEL_WIDTH, RIBBON_HEIGHT};
+use cam_workspace::app::{CamWorkspaceApp, LEFT_PANEL_MIN_WIDTH, LEFT_PANEL_WIDTH, RIBBON_HEIGHT, STATUS_BAR_HEIGHT};
 use cam_workspace::dialogs_cam::ContourPage;
 use cam_workspace::document::{DEFAULT_EXTRUDE_DEPTH, WireTool};
+use cam_workspace::interactive_geom::{ClickOutcome, SnapKind};
 use cam_workspace::left_manager::ManagerTab;
 use cam_workspace::ribbon::{Command, RibbonTab, SimulationCommand};
 use cam_workspace::simulation_panel::SIMULATION_PANEL_BACKGROUND;
-use cam_workspace::viewport::{TOOL_FILL, TOOLPATH_FEED, TOOLPATH_RAPID, WIREFRAME};
-use solidcore_record::Vec3;
+use cam_workspace::viewport::{SCENE_RADIUS, TOOL_FILL, TOOLPATH_FEED, TOOLPATH_RAPID, WIREFRAME};
+use solidcore_record::{Plane, Vec3};
 use solidcraft_cam::operations::contour2d::{Contour2DParams, LeadKind};
 use solidcraft_cam::stock::{StockDef, StockExcess};
 use std::collections::HashMap;
@@ -85,15 +86,50 @@ fn shot_with(name: &str, tab: ManagerTab, prepare: impl FnOnce(&mut CamWorkspace
     app.manager.tab = tab;
     seed_part(&mut app);
     prepare(&mut app);
+    // A seeded live tool follows the pointer: hand the frames the pointer it snaps under.
+    let pointer = preview_pointer(&app);
     let mut textures = HashMap::new();
     let mut output = None;
     for _ in 0..WARMUP_FRAMES {
-        output = Some(raster::paint(&ctx, &mut app, &mut textures, SIZE));
+        output = Some(raster::paint_at(&ctx, &mut app, &mut textures, SIZE, pointer));
     }
     let Some(output) = output else { panic!("no frame was run") };
     let image = raster::raster(&ctx, &textures, output);
     image.save(shot_path(name)).unwrap();
     image
+}
+
+/// The workspace shot: the seeded part with a live line tool, its rubber band and the AutoCursor
+/// marker the pointer draws.
+fn workspace_shot() -> image::RgbaImage {
+    shot_with("cam-workspace", ManagerTab::Levels, seed_preview)
+}
+
+/// Leaves a line tool live and anchored at a plate corner, with the pointer over the opposite
+/// corner: the shot then records the rubber band and the green endpoint marker.
+fn seed_preview(app: &mut CamWorkspaceApp) {
+    let wires = app.document.wireframe_lines();
+    let corner = wires.first().and_then(|wire| wire.points.first().copied());
+    let target = wires.get(2).and_then(|wire| wire.points.first().copied());
+    let (Some(corner), Some(target)) = (corner, target) else { return };
+    assert!(app.viewport.begin_wireframe_tool(WireTool::Line, Plane::XY), "a line is placed by clicking");
+    assert_eq!(app.viewport.interactive.click(corner), ClickOutcome::Progress, "the first click anchors the line");
+    app.viewport.interactive.track_point(target);
+}
+
+/// Where the live tool's pointer is on screen: the projection of the point it is following into
+/// the viewport the panels leave over.
+fn preview_pointer(app: &CamWorkspaceApp) -> Option<egui::Pos2> {
+    let target = app.viewport.interactive.tool().current_pos()?;
+    let rect = viewport_rect();
+    let (x, y, _) = app.viewport.camera.to_screen(target, f64::from(rect.width()), f64::from(rect.height()), SCENE_RADIUS)?;
+    Some(rect.min + egui::vec2(x as f32, y as f32))
+}
+
+/// The screen rectangle the viewport fills: right of the manager, under the ribbon, above the
+/// status bar.
+fn viewport_rect() -> egui::Rect {
+    egui::Rect::from_min_max(egui::pos2(LEFT_PANEL_WIDTH, RIBBON_HEIGHT), egui::pos2(SIZE.x, SIZE.y - STATUS_BAR_HEIGHT))
 }
 
 /// `target/shots/<name>.png`, created if the folder is missing.
@@ -105,7 +141,7 @@ fn shot_path(name: &str) -> PathBuf {
 
 #[test]
 fn the_workspace_shot_shows_the_unified_manager() {
-    let image = shot("cam-workspace", ManagerTab::Levels);
+    let image = workspace_shot();
     assert_eq!((image.width(), image.height()), (SIZE.x as u32, SIZE.y as u32));
     // A drawn shell has many colours (backgrounds, text, the viewport fill); a blank frame has
     // one. This catches a frame that silently renders nothing.
@@ -122,7 +158,7 @@ fn viewport_pixels(image: &image::RgbaImage) -> impl Iterator<Item = &image::Rgb
 
 #[test]
 fn the_shot_shows_the_live_3d_viewport() {
-    let image = shot("cam-workspace", ManagerTab::Levels);
+    let image = workspace_shot();
     // The gnomon's X arm is red and the ground grid is grey; a placeholder frame had neither.
     let (mut red, mut grey) = (0usize, 0usize);
     for pixel in viewport_pixels(&image) {
@@ -139,8 +175,39 @@ fn the_shot_shows_the_live_3d_viewport() {
 }
 
 #[test]
+fn the_shot_shows_the_live_wireframe_preview_and_its_snap() {
+    let image = workspace_shot();
+    // Pure green marks the AutoCursor endpoint square; the Y axis is a muted green and the
+    // wireframe, the stock and the bodies carry no green at all.
+    let mut green = 0usize;
+    for pixel in viewport_pixels(&image) {
+        let [r, g, b, _] = pixel.0;
+        if g > 200 && r < 80 && b < 80 {
+            green += 1;
+        }
+    }
+    assert!(green > 8, "the endpoint snap marker is drawn in green, got {green} green pixels");
+}
+
+#[test]
+fn the_pointer_snaps_to_the_corner_the_preview_aims_at() {
+    let ctx = egui::Context::default();
+    let mut app = CamWorkspaceApp::with_context(&ctx);
+    seed_part(&mut app);
+    seed_preview(&mut app);
+    let pointer = preview_pointer(&app).expect("the live tool follows a pointer");
+    let mut textures = HashMap::new();
+    for _ in 0..WARMUP_FRAMES {
+        raster::paint_at(&ctx, &mut app, &mut textures, SIZE, Some(pointer));
+    }
+    let snap = app.viewport.interactive.snap().expect("the pointer snaps to the plate's corner");
+    assert_eq!(snap.kind, SnapKind::Endpoint);
+    assert_eq!(app.viewport.interactive.preview(48).len(), 1, "the rubber band is drawn");
+}
+
+#[test]
 fn the_shot_shows_the_part_the_ribbon_tools_built() {
-    let image = shot("cam-workspace", ManagerTab::Levels);
+    let image = workspace_shot();
     // The wireframe of level 2's circle is drawn in the WIREFRAME blue.
     let (mut wire, mut shaded) = (0usize, 0usize);
     for pixel in viewport_pixels(&image) {
@@ -188,7 +255,7 @@ fn the_tool_library_shot_shows_the_modal_dialog() {
 
 #[test]
 fn the_shot_shows_the_translucent_stock() {
-    let image = shot("cam-workspace", ManagerTab::Levels);
+    let image = workspace_shot();
     // The stock is translucent, so it blends its red fill into the scene rather than hiding the
     // part: look for pixels tinted red but still carrying the background and the bodies.
     let mut tinted = 0usize;

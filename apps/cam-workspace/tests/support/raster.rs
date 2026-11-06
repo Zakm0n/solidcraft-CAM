@@ -9,14 +9,23 @@ use egui::{ColorImage, TextureId, pos2};
 
 use std::collections::HashMap;
 
-/// Runs one frame of `app` into `size` and uploads the textures it produced.
-pub fn paint(ctx: &egui::Context, app: &mut CamWorkspaceApp, textures: &mut HashMap<TextureId, ColorImage>, size: egui::Vec2) -> egui::FullOutput {
+/// Runs one frame with the pointer at `pointer`, so a shot can show what the cursor does — the
+/// hovered control, the viewport's rubber band and its snap marker — and uploads the textures.
+pub fn paint_at(
+    ctx: &egui::Context,
+    app: &mut CamWorkspaceApp,
+    textures: &mut HashMap<TextureId, ColorImage>,
+    size: egui::Vec2,
+    pointer: Option<egui::Pos2>,
+) -> egui::FullOutput {
     let time = ctx.cumulative_frame_nr() as f64 / 15.0;
+    let events = pointer.map(|pos| vec![egui::Event::PointerMoved(pos)]).unwrap_or_default();
     let mut out = ctx.run_ui(
         egui::RawInput {
             time: Some(time),
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
             focused: true,
+            events,
             ..Default::default()
         },
         |ui| app.draw(ui),

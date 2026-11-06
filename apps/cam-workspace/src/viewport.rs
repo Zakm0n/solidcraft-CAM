@@ -24,7 +24,9 @@ use solidcraft_geom::Mesh;
 use solidcraft_render::{Camera, Rgb, Scene, SceneLine, SceneMesh, StandardView, render};
 
 use crate::document::{CamDocument, WireTool, standard_plane};
-use crate::interactive_geom::InteractiveGeometry;
+use crate::interactive_geom::{
+    ARC_PREVIEW_SEGMENTS, InteractiveGeometry, SNAP_RADIUS_PIXELS, SnapCandidate, SnapKind, WireframeTool, snap_candidates,
+};
 use crate::ribbon::{ViewCommand, ViewCommand::*};
 
 /// Background gradient of the viewport, top and bottom: the light workspace the shell uses.
@@ -84,6 +86,19 @@ pub const AXIS_X: Rgb = Rgb(220, 60, 60);
 pub const AXIS_Y: Rgb = Rgb(60, 170, 60);
 pub const AXIS_Z: Rgb = Rgb(60, 100, 230);
 
+/// The live wireframe preview's stroke: the cyan the blueprint gives the entity being placed.
+pub const PREVIEW_COLOR: Color32 = Color32::from_rgb(0, 255, 255);
+
+/// Width of the live preview's stroke, in points: thin enough to read the geometry under it.
+pub const PREVIEW_WIDTH: f32 = 1.5;
+
+/// The AutoCursor marker's colour: green, so it separates from the cyan preview.
+pub const SNAP_COLOR: Color32 = Color32::GREEN;
+
+/// The AutoCursor marker's radius, in points: the square, triangle and circle all reach this far
+/// from the snapped point.
+pub const SNAP_RADIUS: f32 = 4.0;
+
 /// How far the ground grid reaches from the origin, in mm, on each axis.
 pub const GRID_EXTENT: f64 = 250.0;
 
@@ -137,6 +152,10 @@ pub struct Viewport {
     pub camera: Camera,
     /// The clicking wireframe tool, and where the pointer is on the construction plane.
     pub interactive: InteractiveGeometry,
+    /// The document's snap candidates, gathered at `snap_revision` and reused while it holds.
+    snap_candidates: Vec<SnapCandidate>,
+    /// The document revision `snap_candidates` describes; `u64::MAX` until they are gathered.
+    snap_revision: u64,
     /// The last picture uploaded to egui, with what it was rendered from.
     picture: Option<Rendered>,
 }
@@ -163,7 +182,13 @@ struct RenderKey {
 
 impl Default for Viewport {
     fn default() -> Self {
-        Self { camera: home_camera(), interactive: InteractiveGeometry::default(), picture: None }
+        Self {
+            camera: home_camera(),
+            interactive: InteractiveGeometry::default(),
+            snap_candidates: Vec::new(),
+            snap_revision: u64::MAX,
+            picture: None,
+        }
     }
 }
 
@@ -514,6 +539,50 @@ fn colour(rgb: Rgb) -> Color32 {
     Color32::from_rgb(rgb.0, rgb.1, rgb.2)
 }
 
+/// The snap under `pointer`: the candidate whose projection is nearest, within
+/// [`SNAP_RADIUS_PIXELS`] of the pointer. A candidate exactly as near as the winner loses to the
+/// higher-priority kind, so a vertex beats the midpoint that happens to project onto it.
+fn pick_snap(candidates: &[SnapCandidate], rect: Rect, pointer: egui::Pos2, camera: &Camera) -> Option<SnapCandidate> {
+    let (width, height) = (f64::from(rect.width()), f64::from(rect.height()));
+    let pointer = pointer - rect.min;
+    let mut best: Option<(f32, u8, SnapCandidate)> = None;
+    for candidate in candidates {
+        let Some((x, y, _)) = camera.to_screen(candidate.at, width, height, SCENE_RADIUS) else { continue };
+        let distance = (x as f32 - pointer.x).hypot(y as f32 - pointer.y);
+        if !distance.is_finite() || distance > SNAP_RADIUS_PIXELS {
+            continue;
+        }
+        let priority = candidate.kind.priority();
+        let wins = best.is_none_or(|(best_distance, best_priority, _)| {
+            distance < best_distance - 1e-6 || ((distance - best_distance).abs() <= 1e-6 && priority < best_priority)
+        });
+        if wins {
+            best = Some((distance, priority, *candidate));
+        }
+    }
+    best.map(|(_, _, candidate)| candidate)
+}
+
+/// Draws the AutoCursor marker for a snap `kind` at `at`: a square for an endpoint, a triangle
+/// for a midpoint, and a circle for a centre, each [`SNAP_RADIUS`] across.
+fn paint_snap_marker(painter: &egui::Painter, kind: SnapKind, at: egui::Pos2) {
+    let stroke = Stroke::new(PREVIEW_WIDTH, SNAP_COLOR);
+    match kind {
+        SnapKind::Endpoint => {
+            let corners = [at + Vec2::new(-SNAP_RADIUS, -SNAP_RADIUS), at + Vec2::new(SNAP_RADIUS, -SNAP_RADIUS), at + Vec2::new(SNAP_RADIUS, SNAP_RADIUS), at + Vec2::new(-SNAP_RADIUS, SNAP_RADIUS)];
+            painter.add(egui::Shape::closed_line(corners.to_vec(), stroke));
+        }
+        SnapKind::Midpoint => {
+            let half_base = SNAP_RADIUS * 0.866;
+            let corners = [at + Vec2::new(0.0, -SNAP_RADIUS), at + Vec2::new(half_base, SNAP_RADIUS * 0.5), at + Vec2::new(-half_base, SNAP_RADIUS * 0.5)];
+            painter.add(egui::Shape::closed_line(corners.to_vec(), stroke));
+        }
+        SnapKind::Centre => {
+            painter.circle_stroke(at, SNAP_RADIUS, stroke);
+        }
+    }
+}
+
 impl Viewport {
     /// Applies one frame's camera input: orbit, pan and zoom, each only when it moved.
     pub fn apply(&mut self, input: ViewInput, viewport_height: f32) {
@@ -555,6 +624,9 @@ impl Viewport {
     /// land on, which is what the wireframe tools anchor and what the coordinate readout shows.
     /// A pointer that is not over the viewport, or a view where the plane is edge-on, leaves no
     /// point at all rather than a stale one.
+    ///
+    /// While a clicking tool is live the pointer snaps to a document feature within
+    /// [`SNAP_RADIUS_PIXELS`], and the rubber band ends on that feature instead.
     fn track_pointer(&mut self, rect: Rect, pointer: Option<egui::Pos2>, document: &CamDocument) {
         self.interactive.set_plane(standard_plane(document.active_plane()));
         let Some(position) = pointer else {
@@ -566,7 +638,18 @@ impl Viewport {
         let (origin, direction) = self.camera.ray(x, y, f64::from(rect.width()), f64::from(rect.height()));
         if self.interactive.track_ray(origin, direction).is_none() {
             self.interactive.clear_hover();
+            return;
         }
+        if !self.interactive.is_active() {
+            return;
+        }
+        let revision = document.revision();
+        if revision != self.snap_revision {
+            self.snap_candidates = snap_candidates(document);
+            self.snap_revision = revision;
+        }
+        let snap = pick_snap(&self.snap_candidates, rect, position, &self.camera);
+        self.interactive.set_snap(snap);
     }
 
     /// World length one screen point covers at the camera's target: the scale bar's unit.
@@ -617,10 +700,58 @@ impl Viewport {
             let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
             ui.painter().image(picture.texture.id(), rect, uv, Color32::WHITE);
         }
+        self.paint_wireframe(ui, rect);
         self.paint_gnomon_labels(ui, rect);
         self.paint_scale_bar(ui, rect);
         // Last, so the controls sit over the picture rather than under it.
         self.view_controls(ui, rect);
+    }
+
+    /// Paints the live wireframe tool over the picture: the cyan rubber band from the anchored
+    /// points to the pointer, a marker on each anchor, and the green AutoCursor marker of the
+    /// document feature the pointer has snapped to.
+    fn paint_wireframe(&self, ui: &Ui, rect: Rect) {
+        if !self.interactive.is_active() {
+            return;
+        }
+        let painter = ui.painter();
+        let project = |point: Vec3| self.project(point, rect);
+        let stroke = Stroke::new(PREVIEW_WIDTH, PREVIEW_COLOR);
+
+        for polyline in self.interactive.preview(ARC_PREVIEW_SEGMENTS) {
+            let points: Vec<egui::Pos2> = polyline.iter().filter_map(|point| project(*point)).collect();
+            if points.len() == 2 {
+                painter.line_segment([points[0], points[1]], stroke);
+            } else if points.len() > 2 {
+                painter.add(egui::Shape::line(points, stroke));
+            }
+        }
+
+        // The anchored points, as small crosses: where the entity already starts.
+        for anchor in self.interactive.anchors() {
+            if let Some(at) = project(anchor) {
+                let arm = Vec2::splat(SNAP_RADIUS);
+                painter.line_segment([at - arm, at + arm], stroke);
+            }
+        }
+
+        // The point tool has no band: its cursor is where the point would land.
+        if matches!(self.interactive.tool(), WireframeTool::Point(_))
+            && let Some(at) = self.interactive.hover().and_then(project)
+        {
+            let arm = Vec2::splat(SNAP_RADIUS);
+            painter.line_segment([at - arm, at + arm], stroke);
+        }
+
+        if let Some(snap) = self.interactive.snap().and_then(|snap| project(snap.at).map(|at| (snap.kind, at))) {
+            paint_snap_marker(painter, snap.0, snap.1);
+        }
+    }
+
+    /// The screen point `point` projects to in `rect`, if the camera can see it.
+    fn project(&self, point: Vec3, rect: Rect) -> Option<egui::Pos2> {
+        let (x, y, _) = self.camera.to_screen(point, f64::from(rect.width()), f64::from(rect.height()), SCENE_RADIUS)?;
+        Some(rect.min + Vec2::new(x as f32, y as f32))
     }
 
     /// The view controls overlaid in the viewport's top-left corner: Home and the axis views.
@@ -716,6 +847,7 @@ impl Viewport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solidcraft_geom::Vec3Geom;
 
     #[test]
     fn the_home_view_is_isometric_and_frames_the_whole_grid() {
@@ -791,6 +923,64 @@ mod tests {
         viewport.track_pointer(rect, Some(rect.center()), &document);
         assert!(viewport.interactive.is_active());
         assert!(viewport.interactive.tool().current_pos().is_some(), "the line tool follows the cursor");
+    }
+
+    #[test]
+    fn snapping_takes_a_feature_within_eight_pixels() {
+        let viewport = Viewport::default();
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(400.0, 400.0));
+        let at = Vec3::new(10.0, 10.0, 0.0);
+        let on_screen = viewport.project(at, rect).expect("the TOP plane is in view");
+        let candidates = [SnapCandidate { kind: SnapKind::Endpoint, at }];
+        assert_eq!(pick_snap(&candidates, rect, on_screen, &viewport.camera), Some(candidates[0]), "the pointer on the vertex snaps to it");
+        let inside = on_screen + Vec2::new(SNAP_RADIUS_PIXELS - 1.0, 0.0);
+        assert_eq!(pick_snap(&candidates, rect, inside, &viewport.camera), Some(candidates[0]), "a pixel inside the reach snaps");
+        let outside = on_screen + Vec2::new(SNAP_RADIUS_PIXELS + 1.0, 0.0);
+        assert_eq!(pick_snap(&candidates, rect, outside, &viewport.camera), None, "a pixel outside the reach does not");
+    }
+
+    #[test]
+    fn an_endpoint_beats_a_midpoint_at_the_same_distance() {
+        let viewport = Viewport::default();
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(400.0, 400.0));
+        let at = Vec3::new(10.0, 10.0, 0.0);
+        let candidates = [
+            SnapCandidate { kind: SnapKind::Midpoint, at },
+            SnapCandidate { kind: SnapKind::Centre, at },
+            SnapCandidate { kind: SnapKind::Endpoint, at },
+        ];
+        let on_screen = viewport.project(at, rect).expect("the TOP plane is in view");
+        let snap = pick_snap(&candidates, rect, on_screen, &viewport.camera).expect("the stacked candidates snap");
+        assert_eq!(snap.kind, SnapKind::Endpoint, "the vertex wins the tie");
+    }
+
+    #[test]
+    fn a_pointer_over_a_document_vertex_snaps_while_a_tool_is_live() {
+        let mut document = CamDocument::default();
+        document.draw(WireTool::Rectangle).expect("the rectangle draws on a new document");
+        let mut viewport = Viewport::default();
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(600.0, 400.0));
+        // With no tool live the pointer stays where it projects.
+        let corner = Vec3::new(50.0, 40.0, 0.0);
+        let pointer = viewport.project(corner, rect).expect("the rectangle is in view");
+        viewport.track_pointer(rect, Some(pointer), &document);
+        assert_eq!(viewport.interactive.snap(), None);
+
+        assert!(viewport.begin_wireframe_tool(WireTool::Line, Plane::XY));
+        viewport.track_pointer(rect, Some(pointer), &document);
+        let snap = viewport.interactive.snap().expect("the pointer is on the rectangle's corner");
+        assert_eq!(snap.kind, SnapKind::Endpoint);
+        assert!(snap.at.dist(corner) < 1e-9, "the snap is the corner itself, got {:?}", snap.at);
+        assert_eq!(viewport.interactive.hover(), Some(snap.at), "the pointer is the snap, not the projection beside it");
+    }
+
+    #[test]
+    fn the_snap_reach_matches_the_blueprint() {
+        assert_eq!(SNAP_RADIUS_PIXELS, 8.0);
+        assert_eq!(PREVIEW_WIDTH, 1.5);
+        assert_eq!(PREVIEW_COLOR, Color32::from_rgb(0, 255, 255));
+        assert_eq!(SNAP_COLOR, Color32::GREEN);
+        assert_eq!(SNAP_RADIUS, 4.0);
     }
 
     #[test]
