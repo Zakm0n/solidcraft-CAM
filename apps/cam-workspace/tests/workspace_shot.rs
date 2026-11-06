@@ -9,6 +9,7 @@
 mod raster;
 
 use cam_workspace::app::{CamWorkspaceApp, LEFT_PANEL_MIN_WIDTH, LEFT_PANEL_WIDTH, RIBBON_HEIGHT};
+use cam_workspace::dialogs_cam::ContourPage;
 use cam_workspace::document::{DEFAULT_EXTRUDE_DEPTH, WireTool};
 use cam_workspace::left_manager::ManagerTab;
 use cam_workspace::ribbon::{Command, RibbonTab};
@@ -184,6 +185,30 @@ fn the_stock_setup_shot_shows_the_modal_dialog() {
     });
     assert!(opened, "the dialog is open while the frames run");
     assert_eq!((image.width(), image.height()), (SIZE.x as u32, SIZE.y as u32));
+    let colours = image.pixels().map(|p| p.0).collect::<std::collections::BTreeSet<_>>();
+    assert!(colours.len() > 32, "the dialog must show drawn UI, got {} colours", colours.len());
+}
+
+#[test]
+fn the_contour_dialog_shot_shows_the_parameter_pages() {
+    let mut opened = false;
+    let image = shot_with("cam-workspace-contour2d", ManagerTab::Toolpaths, |app| {
+        app.ribbon.tab = RibbonTab::Machine;
+        app.run(Command::Contour2D);
+        let chain: Vec<usize> = app.document.chain_entities().iter().map(|entity| entity.id).collect();
+        if let Some(dialog) = app.contour2d_dialog_mut() {
+            dialog.params_mut().chain = chain;
+            dialog.params_mut().depth_cuts.max_rough_step = 2.0;
+            dialog.params_mut().multipasses.rough_passes = 2;
+            dialog.params_mut().lead_in_out.entry.kind = solidcraft_cam::operations::contour2d::LeadKind::Arc;
+            dialog.set_page(ContourPage::Linking);
+        }
+        opened = app.contour2d_open();
+    });
+    assert!(opened, "the dialog is open while the frames run");
+    assert_eq!((image.width(), image.height()), (SIZE.x as u32, SIZE.y as u32));
+    // The page list, the linking fields and the footer sit over the dimmed workspace; a frame
+    // that failed to open the dialog would leave only the plain workspace.
     let colours = image.pixels().map(|p| p.0).collect::<std::collections::BTreeSet<_>>();
     assert!(colours.len() > 32, "the dialog must show drawn UI, got {} colours", colours.len());
 }

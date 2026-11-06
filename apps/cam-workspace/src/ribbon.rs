@@ -162,6 +162,8 @@ pub enum Command {
     Import(ImportKind),
     /// Open the Tool Library dialog.
     ToolLibrary,
+    /// Open the 2D Contour parameter dialog on a new operation.
+    Contour2D,
     /// Open the Stock Setup dialog.
     StockSetup,
     /// Move the camera to a standard view.
@@ -240,8 +242,14 @@ const TRANSFORM_TOOLS: [Tool; 5] = [pending("Translate"), pending("Rotate"), pen
 const ART_TOOLS: [Tool; 4] = [pending("Loft"), pending("Sculpt"), pending("Stitch"), pending("Smooth")];
 
 /// The `Machine` tab: the machine group and its toolpaths, and the tool library they select from.
-const MACHINE_TOOLS: [Tool; 5] =
-    [pending("Machine Group"), pending("Toolpaths"), live("Tool Library", Command::ToolLibrary), pending("Verify"), pending("Post")];
+const MACHINE_TOOLS: [Tool; 6] = [
+    pending("Machine Group"),
+    live("2D Contour", Command::Contour2D),
+    pending("Toolpaths"),
+    live("Tool Library", Command::ToolLibrary),
+    pending("Verify"),
+    pending("Post"),
+];
 
 /// The `Simulation` tab: the stock the program cuts and the verification of the result.
 const SIMULATION_TOOLS: [Tool; 4] = [live("Stock Setup", Command::StockSetup), pending("Verify"), pending("Play"), pending("Step")];
@@ -364,5 +372,11 @@ mod tests {
     fn the_machine_tab_opens_the_tool_library() {
         assert!(MACHINE_TOOLS.iter().any(|tool| tool.command == Some(Command::ToolLibrary)), "the Tool Library button is live");
         assert!(MACHINE_TOOLS.iter().all(|tool| !tool.label.is_empty()));
+    }
+
+    #[test]
+    fn the_machine_tab_defines_a_contour_operation() {
+        assert!(MACHINE_TOOLS.iter().any(|tool| tool.command == Some(Command::Contour2D)), "the Machine tab opens the 2D Contour dialog");
+        assert_eq!(MACHINE_TOOLS.iter().filter(|tool| tool.command.is_some()).count(), 2, "exactly the library and the contour are live");
     }
 }

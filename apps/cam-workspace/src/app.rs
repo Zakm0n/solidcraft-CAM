@@ -7,12 +7,13 @@
 //! the viewport and its solid shows up in the manager at once.
 
 use egui::{Align, Color32, Layout};
+use solidcraft_cam::operations::contour2d::Contour2DParams;
 use solidcraft_cam::stock::StockDef;
 use solidcraft_cam::tool::ToolLibrary;
 
-use crate::dialogs_cam::{StockOutcome, StockSetupDialog, ToolLibraryDialog, ToolLibraryOutcome};
+use crate::dialogs_cam::{Contour2DDialog, Contour2DOutcome, StockOutcome, StockSetupDialog, ToolLibraryDialog, ToolLibraryOutcome};
 use crate::document::{CamDocument, ImportSummary, SolidTool, WireTool};
-use crate::left_manager::LeftManager;
+use crate::left_manager::{LeftManager, ManagerAction};
 use crate::ribbon::{Command, ImportKind, Ribbon, ViewCommand};
 use crate::viewport::Viewport;
 
@@ -70,6 +71,10 @@ pub struct CamWorkspaceApp {
     tool_library: Option<ToolLibraryDialog>,
     /// The Stock Setup dialog, while one is open.
     stock_setup: Option<StockSetupDialog>,
+    /// The 2D Contour dialog, while one is open.
+    contour2d: Option<Contour2DDialog>,
+    /// The 2D Contour operations the workspace has defined.
+    operations: Vec<Contour2DParams>,
 }
 
 /// The import dialog: a path field and the button that reads the file into the active level.
@@ -199,6 +204,39 @@ impl CamWorkspaceApp {
         self.stock_setup = None;
     }
 
+    /// Whether the 2D Contour dialog is open.
+    pub fn contour2d_open(&self) -> bool {
+        self.contour2d.is_some()
+    }
+
+    /// The 2D Contour dialog, while one is open.
+    pub fn contour2d_dialog(&self) -> Option<&Contour2DDialog> {
+        self.contour2d.as_ref()
+    }
+
+    /// The 2D Contour dialog, to drive its pages from a test.
+    pub fn contour2d_dialog_mut(&mut self) -> Option<&mut Contour2DDialog> {
+        self.contour2d.as_mut()
+    }
+
+    /// The 2D Contour operations the workspace has defined.
+    pub fn operations(&self) -> &[Contour2DParams] {
+        &self.operations
+    }
+
+    /// Stores a 2D Contour operation the dialog accepted, closes it and reports the result.
+    pub fn accept_contour2d(&mut self, params: Contour2DParams) {
+        let tool = self.tools.get(params.tool_id).map_or_else(|| format!("tool {}", params.tool_id), |assembly| assembly.name.clone());
+        self.status = format!("{tool} · {}", params.summary());
+        self.operations.push(params);
+        self.contour2d = None;
+    }
+
+    /// Closes the 2D Contour dialog without storing an operation.
+    pub fn cancel_contour2d(&mut self) {
+        self.contour2d = None;
+    }
+
     /// Runs the command a ribbon button asked for, and reports the result in the status bar.
     pub fn run(&mut self, command: Command) {
         match command {
@@ -206,11 +244,27 @@ impl CamWorkspaceApp {
             Command::Solid(tool) => self.run_solid(tool),
             Command::Import(kind) => self.import = Some(ImportDialog::new(kind)),
             Command::ToolLibrary => self.open_tool_library(),
+            Command::Contour2D => self.open_contour2d(),
             Command::StockSetup => self.open_stock_setup(),
             Command::View(view) => {
                 self.apply_view(view);
                 self.status = format!("{} view", view.label());
             }
+        }
+    }
+
+    /// Opens the 2D Contour dialog on a new operation: the first tool in the library, and no
+    /// geometry chained until the user picks it.
+    fn open_contour2d(&mut self) {
+        let tool_id = self.tools.assemblies().first().map_or(0, |assembly| assembly.id);
+        self.status = "2D Contour: chain geometry and choose a tool".to_string();
+        self.contour2d = Some(Contour2DDialog::new(Contour2DParams::new(Vec::new(), tool_id)));
+    }
+
+    /// Runs what a left manager view asked for, after the panel has been drawn.
+    fn run_manager(&mut self, action: ManagerAction) {
+        match action {
+            ManagerAction::NewContour2D => self.open_contour2d(),
         }
     }
 
@@ -264,6 +318,7 @@ impl CamWorkspaceApp {
         let plane = self.document.active_plane_name();
         let solids = self.document.solids().len();
         let tools = self.tools.len();
+        let operations = self.operations.len();
         let status = self.status.clone();
         let frame = egui::Frame::new().fill(STATUS_BAR_BACKGROUND).inner_margin(egui::Margin::symmetric(8, 2));
         egui::Panel::bottom("status_bar").exact_size(STATUS_BAR_HEIGHT).frame(frame).show(ui, |ui| {
@@ -275,6 +330,8 @@ impl CamWorkspaceApp {
                 ui.label(format!("{solids} solid(s)"));
                 ui.separator();
                 ui.label(format!("{tools} tool(s)"));
+                ui.separator();
+                ui.label(format!("{operations} toolpath(s)"));
                 ui.separator();
                 ui.label(status);
                 // Right: the construction plane new geometry is drawn on.
@@ -288,12 +345,18 @@ impl CamWorkspaceApp {
     /// The left manager panel: one tab strip over the four views, resizable within limits that
     /// keep both the level columns and the viewport usable.
     fn manager_panel(&mut self, ui: &mut egui::Ui) {
+        let mut action = None;
         egui::Panel::left("left_manager_panel")
             .resizable(true)
             .default_size(LEFT_PANEL_WIDTH)
             .min_size(LEFT_PANEL_MIN_WIDTH)
             .max_size(LEFT_PANEL_MAX_WIDTH)
-            .show(ui, |ui| self.manager.ui(ui, &mut self.document));
+            .show(ui, |ui| {
+                action = self.manager.ui(ui, &mut self.document, &self.operations, &self.tools);
+            });
+        if let Some(action) = action {
+            self.run_manager(action);
+        }
     }
 
     /// The import dialog, while one is open: it is a modal window over the viewport.
@@ -355,6 +418,16 @@ impl CamWorkspaceApp {
         }
     }
 
+    /// The 2D Contour dialog, while one is open: it is a modal window over the viewport.
+    fn show_contour2d(&mut self, ui: &mut egui::Ui) {
+        let Some(mut dialog) = self.contour2d.take() else { return };
+        match dialog.ui(ui.ctx(), &self.document, &self.tools) {
+            Contour2DOutcome::Open => self.contour2d = Some(dialog),
+            Contour2DOutcome::Accept(params) => self.accept_contour2d(*params),
+            Contour2DOutcome::Cancel => (),
+        }
+    }
+
     /// Draws one frame of the workspace into `ui`: the panels first, the viewport last.
     pub fn draw(&mut self, ui: &mut egui::Ui) {
         // The ribbon runs its button's command after it has drawn, so the panel is not borrowed
@@ -372,6 +445,7 @@ impl CamWorkspaceApp {
         self.import_dialog(ui);
         self.show_tool_library(ui);
         self.show_stock_setup(ui);
+        self.show_contour2d(ui);
     }
 }
 
@@ -409,6 +483,7 @@ impl eframe::App for CamWorkspaceApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::left_manager::ManagerTab;
 
     #[test]
     fn a_command_reports_its_result_in_the_status_bar() {
@@ -537,5 +612,52 @@ mod tests {
         app.run(Command::View(ViewCommand::Home));
         assert_eq!(app.viewport.camera, crate::viewport::home_camera());
         assert_eq!(app.status(), "Home view");
+    }
+
+    #[test]
+    fn the_contour_command_opens_the_dialog_on_the_libraries_first_tool() {
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        app.run(Command::Contour2D);
+        assert!(app.contour2d_open());
+        let first_tool = app.tools.assemblies().first().map(|assembly| assembly.id);
+        assert_eq!(app.contour2d_dialog().map(|dialog| dialog.params().tool_id), first_tool);
+        assert!(app.operations().is_empty(), "opening the dialog stores nothing");
+        app.cancel_contour2d();
+        assert!(!app.contour2d_open());
+        assert!(app.operations().is_empty(), "cancelling stores nothing");
+    }
+
+    #[test]
+    fn the_toolpaths_tab_defines_and_stores_a_contour_operation() {
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        app.document.draw(WireTool::Rectangle).unwrap_or_default();
+        app.manager.tab = ManagerTab::Toolpaths;
+        app.run_manager(ManagerAction::NewContour2D);
+        assert!(app.contour2d_open(), "the Toolpaths tab's button opens the parameter dialog");
+
+        let chain: Vec<usize> = app.document.chain_entities().iter().map(|entity| entity.id).collect();
+        assert_eq!(chain.len(), 4);
+        if let Some(dialog) = app.contour2d_dialog_mut() {
+            dialog.params_mut().chain = chain;
+        }
+        let accepted = app.contour2d_dialog().and_then(|dialog| dialog.accept().ok()).unwrap_or_default();
+        app.accept_contour2d(accepted);
+
+        assert!(!app.contour2d_open());
+        assert_eq!(app.operations().len(), 1);
+        assert_eq!(app.operations()[0].chain_len(), 4);
+        assert!(app.status().contains("2D Contour"), "status: {}", app.status());
+        assert!(app.status().starts_with("Ø6 flat endmill"), "status names the tool, got {}", app.status());
+    }
+
+    #[test]
+    fn a_contour_without_a_chain_is_refused_by_the_dialog() {
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        app.run(Command::Contour2D);
+        assert!(app.contour2d_dialog().and_then(|dialog| dialog.accept().ok()).is_none());
+        assert!(app.operations().is_empty());
     }
 }

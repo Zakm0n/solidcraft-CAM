@@ -187,6 +187,44 @@ pub struct WirePolyline {
     pub points: Vec<Vec3>,
 }
 
+/// One wireframe entity a toolpath can chain: a curve of a visible, selectable level.
+///
+/// The id comes from the document and stays with the curve for the document's life, so an
+/// operation that chains it keeps naming the same curve after its neighbours are drawn or
+/// imported. Wireframe ids are a namespace of their own; solid bodies have their own ids.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChainEntity {
+    /// The entity's identity, as an operation's chain stores it.
+    pub id: usize,
+    /// The level the entity belongs to.
+    pub level: usize,
+    /// The curve's points, in world coordinates.
+    pub points: Vec<Vec3>,
+}
+
+impl ChainEntity {
+    /// The curve's length, in millimetres: the sum of its straight segments.
+    pub fn length(&self) -> f64 {
+        self.points.windows(2).map(|pair| distance(pair[1], pair[0])).sum()
+    }
+
+    /// Whether the curve returns to its start, so a contour can enter and leave it at one point.
+    pub fn is_closed(&self) -> bool {
+        // The sketch's arcs and circles are polylined, so the ends only match to their chord
+        // tolerance; a tenth of a millimetre is below any drawing's feature size.
+        match (self.points.first(), self.points.last()) {
+            (Some(first), Some(last)) => distance(*first, *last) < 0.1,
+            _ => false,
+        }
+    }
+}
+
+/// The straight distance between two world points, in millimetres.
+fn distance(a: Vec3, b: Vec3) -> f64 {
+    let (dx, dy, dz) = (a.x - b.x, a.y - b.y, a.z - b.z);
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
 /// What an import brought in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ImportSummary {
@@ -233,6 +271,8 @@ struct LevelSketch {
     plane: Plane,
     /// The exact sketch curves.
     sketch: Sketch,
+    /// The identity of each curve in `sketch.curves`, in the same order.
+    curve_ids: Vec<usize>,
     /// How many tools have drawn into the sketch, which decides where the next shape lands.
     shapes: usize,
 }
@@ -256,6 +296,8 @@ pub struct CamDocument {
     revision: u64,
     /// The number the next body is named with.
     next_solid: usize,
+    /// The id the next wireframe entity is given.
+    next_entity: usize,
 }
 
 impl Default for CamDocument {
@@ -270,6 +312,7 @@ impl Default for CamDocument {
             stock: None,
             revision: 0,
             next_solid: 1,
+            next_entity: 1,
         }
     }
 }
@@ -417,6 +460,7 @@ impl CamDocument {
         let origin = shape_origin(self.sketches[index].shapes);
         draw_shape(&mut self.sketches[index].sketch, tool, origin)?;
         self.sketches[index].shapes += 1;
+        self.register_curves(index);
         let entities = tool.entity_count();
         self.count_entities(level, entities);
         self.revision += 1;
@@ -524,6 +568,7 @@ impl CamDocument {
         if summary.added == 0 {
             return Err(CamError::Import(format!("{name} holds nothing this reader can draw")));
         }
+        self.register_curves(index);
         self.count_entities(level, summary.added);
         self.revision += 1;
         Ok(summary)
@@ -577,6 +622,49 @@ impl CamDocument {
         out
     }
 
+    /// The wireframe entities a toolpath may chain: every non-construction curve of a visible,
+    /// selectable level, with the id the operation stores.
+    pub fn chain_entities(&self) -> Vec<ChainEntity> {
+        let mut out = Vec::new();
+        for level_sketch in &self.sketches {
+            if !self.level_visible(level_sketch.level) || !self.level_selectable(level_sketch.level) {
+                continue;
+            }
+            let plane = level_sketch.plane;
+            for (index, curve) in level_sketch.sketch.curves.iter().enumerate() {
+                if curve.construction {
+                    continue;
+                }
+                let Some(id) = level_sketch.curve_ids.get(index).copied() else {
+                    continue;
+                };
+                let points: Vec<Vec3> = level_sketch.sketch.polyline(index).iter().map(|point| plane.to_world(*point)).collect();
+                if points.len() >= 2 {
+                    out.push(ChainEntity { id, level: level_sketch.level, points });
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether a level's geometry can be picked.
+    pub fn level_selectable(&self, id: usize) -> bool {
+        self.level(id).is_some_and(|level| level.selectable)
+    }
+
+    /// Gives every curve of `index` that does not have an id yet the next document id.
+    fn register_curves(&mut self, index: usize) {
+        let assigned = self.sketches[index].curve_ids.len();
+        let curves = self.sketches[index].sketch.curves.len();
+        let missing = curves.saturating_sub(assigned);
+        if missing == 0 {
+            return;
+        }
+        let next = self.next_entity;
+        self.sketches[index].curve_ids.extend(next..next + missing);
+        self.next_entity = next + missing;
+    }
+
     /// The plane a level's wireframe lies on: the plane it was started on, or the selected
     /// construction plane before the level has geometry.
     fn level_plane(&self, level: usize) -> Plane {
@@ -589,7 +677,7 @@ impl CamDocument {
             return index;
         }
         let plane = standard_plane(self.active_plane);
-        self.sketches.push(LevelSketch { level, plane, sketch: Sketch::new(), shapes: 0 });
+        self.sketches.push(LevelSketch { level, plane, sketch: Sketch::new(), curve_ids: Vec::new(), shapes: 0 });
         self.sketches.len() - 1
     }
 
@@ -824,6 +912,44 @@ mod tests {
         assert!(document.wireframe_lines().is_empty());
         document.set_level_visible(1, true);
         assert_eq!(document.wireframe_lines().len(), 4);
+    }
+
+    #[test]
+    fn every_wireframe_curve_gets_an_id_that_stays_with_it() {
+        let mut document = CamDocument::default();
+        document.draw(WireTool::Rectangle).unwrap_or_default();
+        let first: Vec<usize> = document.chain_entities().iter().map(|entity| entity.id).collect();
+        assert_eq!(first, [1, 2, 3, 4], "the rectangle's four lines are numbered in drawing order");
+        assert_eq!(document.chain_entities()[0].level, 1);
+        assert!((document.chain_entities()[0].length() - 40.0).abs() < 1e-6, "the rectangle's long side");
+
+        document.add_level();
+        document.draw(WireTool::Circle).unwrap_or_default();
+        let after: Vec<usize> = document.chain_entities().iter().map(|entity| entity.id).collect();
+        assert_eq!(after, [1, 2, 3, 4, 5], "the new level's curve takes the next id");
+        assert!(document.chain_entities()[4].is_closed(), "a circle returns to its start");
+    }
+
+    #[test]
+    fn only_visible_selectable_levels_offer_their_curves_to_a_chain() {
+        let mut document = CamDocument::default();
+        document.draw(WireTool::Rectangle).unwrap_or_default();
+        assert_eq!(document.chain_entities().len(), 4);
+        document.set_level_selectable(1, false);
+        assert!(document.chain_entities().is_empty(), "a level that cannot be picked cannot be chained");
+        document.set_level_selectable(1, true);
+        document.set_level_visible(1, false);
+        assert!(document.chain_entities().is_empty(), "a hidden level cannot be chained");
+    }
+
+    #[test]
+    fn an_imported_dxf_curve_gets_an_id_too() {
+        let mut document = CamDocument::default();
+        let summary = document.import_dxf(DXF, "part.dxf").unwrap_or_default();
+        assert!(summary.added >= 2);
+        let entities = document.chain_entities();
+        assert_eq!(entities.len(), summary.added, "each imported curve is chained by an id");
+        assert!(entities.iter().all(|entity| entity.id > 0));
     }
 
     #[test]

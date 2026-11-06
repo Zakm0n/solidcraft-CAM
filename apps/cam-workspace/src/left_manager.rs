@@ -8,6 +8,8 @@
 //! [`CamDocument`], which the ribbon's tools edit. The manager only owns which tab is open.
 
 use egui::{Color32, RichText, ScrollArea};
+use solidcraft_cam::operations::contour2d::Contour2DParams;
+use solidcraft_cam::tool::ToolLibrary;
 
 use crate::document::CamDocument;
 
@@ -104,6 +106,13 @@ impl ManagerTab {
     }
 }
 
+/// What a manager view asks the application to do after the frame is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagerAction {
+    /// Define a new 2D Contour operation: open its parameter dialog.
+    NewContour2D,
+}
+
 /// The unified left manager: its tab strip and the view over the document.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LeftManager {
@@ -113,7 +122,18 @@ pub struct LeftManager {
 
 impl LeftManager {
     /// The manager panel's contents: the tab strip and the active view under it.
-    pub fn ui(&mut self, ui: &mut egui::Ui, document: &mut CamDocument) {
+    ///
+    /// The toolpaths view lists what `operations` hold and selects tools by `tools`; the other
+    /// views read the document. The returned action is what a button asked for, for the
+    /// application to run after the panel has been drawn.
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        document: &mut CamDocument,
+        operations: &[Contour2DParams],
+        tools: &ToolLibrary,
+    ) -> Option<ManagerAction> {
+        let mut action = None;
         ui.horizontal_wrapped(|ui| {
             for tab in ManagerTab::ALL {
                 ui.selectable_value(&mut self.tab, tab, tab.label());
@@ -124,10 +144,11 @@ impl LeftManager {
         // the panel collapsing around a short list.
         ScrollArea::vertical().id_salt("left_manager_scroll").auto_shrink([false, false]).show(ui, |ui| match self.tab {
             ManagerTab::Levels => Self::levels_view(ui, document),
-            ManagerTab::Toolpaths => empty_state(ui, "No toolpaths created"),
+            ManagerTab::Toolpaths => action = Self::toolpaths_view(ui, operations, tools),
             ManagerTab::Planes => Self::planes_view(ui, document),
             ManagerTab::Solids => Self::solids_view(ui, document),
         });
+        action
     }
 
     /// The `Levels` view: the level table, a new-level button and the level count.
@@ -208,6 +229,39 @@ impl LeftManager {
             }
         });
         ui.separator();
+    }
+
+    /// The `Toolpaths` view: the operations defined so far and the button that defines another.
+    fn toolpaths_view(ui: &mut egui::Ui, operations: &[Contour2DParams], tools: &ToolLibrary) -> Option<ManagerAction> {
+        let mut action = None;
+        ui.horizontal(|ui| {
+            if ui.button("+ 2D Contour").on_hover_text("Define a contour operation along chained wireframe").clicked() {
+                action = Some(ManagerAction::NewContour2D);
+            }
+            let count = operations.len();
+            let plural = if count == 1 { "" } else { "s" };
+            ui.label(RichText::new(format!("{count} operation{plural}")).weak());
+        });
+        ui.separator();
+        if operations.is_empty() {
+            empty_state(ui, "No toolpaths created");
+            return action;
+        }
+        for (index, params) in operations.iter().enumerate() {
+            let tool = tools.get(params.tool_id).map_or("no tool", |assembly| assembly.name.as_str());
+            let row = egui::Frame::new().inner_margin(egui::Margin::symmetric(2, 1));
+            row.show(ui, |ui| {
+                let entity_width = name_width(ui);
+                ui.horizontal(|ui| {
+                    ui.add_sized([NUMBER_WIDTH, ROW_HEIGHT], egui::Label::new(RichText::new(format!("{}", index + 1)).monospace()));
+                    ui.add_sized([entity_width, ROW_HEIGHT], egui::Label::new(format!("2D Contour · {tool}")));
+                    ui.add_sized([ENTITY_WIDTH, ROW_HEIGHT], egui::Label::new(RichText::new(format!("{} ent", params.chain_len())).monospace()));
+                });
+            });
+        }
+        ui.separator();
+        ui.label(RichText::new("Parameters are stored; the toolpath is generated in the verification phase.").weak());
+        action
     }
 
     /// The `Planes` view: the standard construction planes, one of them selected.

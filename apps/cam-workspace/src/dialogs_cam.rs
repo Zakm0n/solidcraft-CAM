@@ -6,6 +6,9 @@
 //! half-typed diameter never reaches an operation that already names the tool.
 
 use egui::{Align, Color32, Layout, RichText, ScrollArea};
+use solidcraft_cam::operations::contour2d::{
+    Compensation, Contour2DError, Contour2DParams, CutDirection, DepthOrder, LeadKind, LeadMove, LinkingMode,
+};
 use solidcraft_cam::stock::{StockDef, StockError, StockExcess};
 use solidcraft_cam::tool::{CuttingTool, PRESETS, ToolAssembly, ToolError, ToolHolder, ToolLibrary, ToolType};
 
@@ -577,6 +580,484 @@ impl StockSetupDialog {
     }
 }
 
+/// The 2D Contour dialog's width, in points: the page list and the active page side by side.
+pub const CONTOUR_DIALOG_WIDTH: f32 = 760.0;
+
+/// Width of the page list on the dialog's left, in points.
+const CONTOUR_PAGES_WIDTH: f32 = 156.0;
+
+/// Height of the active page, in points: enough for the longest page without scrolling the modal.
+const CONTOUR_PAGE_HEIGHT: f32 = 330.0;
+
+/// The parameter pages of the 2D Contour dialog, in Mastercam's order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ContourPage {
+    /// The wireframe entities the toolpath follows.
+    #[default]
+    Geometry,
+    /// The tool assembly that cuts it.
+    Tool,
+    /// Compensation, cutter side and stock to leave.
+    CutParameters,
+    /// How the total depth is divided into cuts.
+    DepthCuts,
+    /// Extra passes across the wall at each depth.
+    MultiPasses,
+    /// The entry and exit moves.
+    LeadInOut,
+    /// Clearance, retract, feed plane, top of stock and depth.
+    Linking,
+}
+
+impl ContourPage {
+    /// The pages in the order the dialog lists them.
+    pub const ALL: [Self; 7] = [Self::Geometry, Self::Tool, Self::CutParameters, Self::DepthCuts, Self::MultiPasses, Self::LeadInOut, Self::Linking];
+
+    /// The page's text in the page list.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Geometry => "Geometry",
+            Self::Tool => "Tool",
+            Self::CutParameters => "Cut Parameters",
+            Self::DepthCuts => "Depth Cuts",
+            Self::MultiPasses => "Multi Passes",
+            Self::LeadInOut => "Lead In/Out",
+            Self::Linking => "Linking",
+        }
+    }
+}
+
+/// What the 2D Contour dialog asks the application to do once the frame is drawn.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Contour2DOutcome {
+    /// The dialog stays open and the document is untouched.
+    Open,
+    /// The user accepted a valid operation.
+    Accept(Box<Contour2DParams>),
+    /// The user closed the dialog; nothing is stored.
+    Cancel,
+}
+
+/// What the footer's buttons asked for, before the parameters are validated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ContourAction {
+    #[default]
+    None,
+    Accept,
+    Cancel,
+}
+
+/// Which lead move a lead section edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeadSide {
+    /// The move onto the chain.
+    Entry,
+    /// The move off the chain.
+    Exit,
+}
+
+/// The 2D Contour dialog: the parameter pages of one operation, as a modal.
+///
+/// The dialog edits a copy of the operation's parameters; `OK` validates the result before
+/// handing it back, and `Cancel` throws it away. A chain left empty or a depth above the stock is
+/// reported beside the buttons instead of being stored.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Contour2DDialog {
+    /// The operation's parameters, as the pages have them so far.
+    params: Contour2DParams,
+    /// The page the dialog shows.
+    page: ContourPage,
+    /// Why the last `OK` was refused, shown under the buttons.
+    error: Option<String>,
+}
+
+impl Contour2DDialog {
+    /// A dialog over `params`, starting on the geometry page.
+    pub fn new(params: Contour2DParams) -> Self {
+        Self { params, page: ContourPage::Geometry, error: None }
+    }
+
+    /// The parameters as the pages have them so far.
+    pub fn params(&self) -> &Contour2DParams {
+        &self.params
+    }
+
+    /// The parameters, to drive the pages from a test.
+    pub fn params_mut(&mut self) -> &mut Contour2DParams {
+        &mut self.params
+    }
+
+    /// The page the dialog shows.
+    pub fn page(&self) -> ContourPage {
+        self.page
+    }
+
+    /// Shows `page`.
+    pub fn set_page(&mut self, page: ContourPage) {
+        self.page = page;
+    }
+
+    /// Why the last `OK` was refused, if it was.
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// The operation `OK` would store, or why it cannot cut.
+    pub fn accept(&self) -> Result<Contour2DParams, Contour2DError> {
+        self.params.validate()?;
+        Ok(self.params.clone())
+    }
+
+    /// Draws the modal and reports what the user asked for.
+    pub fn ui(&mut self, ctx: &egui::Context, document: &CamDocument, tools: &ToolLibrary) -> Contour2DOutcome {
+        let mut action = ContourAction::None;
+        let modal = egui::Modal::new(egui::Id::unique("contour2d_dialog")).show(ctx, |ui| {
+            ui.set_width(CONTOUR_DIALOG_WIDTH);
+            self.heading(ui, tools);
+            ui.separator();
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(CONTOUR_PAGES_WIDTH);
+                    for page in ContourPage::ALL {
+                        ui.selectable_value(&mut self.page, page, page.label());
+                    }
+                });
+                ui.separator();
+                ScrollArea::vertical().id_salt("contour2d_page").max_height(CONTOUR_PAGE_HEIGHT).auto_shrink([false, false]).show(ui, |ui| {
+                    ui.set_min_width(CONTOUR_DIALOG_WIDTH - CONTOUR_PAGES_WIDTH - 48.0);
+                    ui.set_min_height(CONTOUR_PAGE_HEIGHT);
+                    // The page sits beside the page list, so it needs a layout of its own; the
+                    // rows would otherwise run to the right of one another.
+                    ui.vertical(|ui| match self.page {
+                        ContourPage::Geometry => self.geometry_page(ui, document),
+                        ContourPage::Tool => self.tool_page(ui, tools),
+                        ContourPage::CutParameters => self.cut_page(ui),
+                        ContourPage::DepthCuts => self.depth_page(ui),
+                        ContourPage::MultiPasses => self.multipass_page(ui),
+                        ContourPage::LeadInOut => self.lead_page(ui),
+                        ContourPage::Linking => self.linking_page(ui),
+                    });
+                });
+            });
+            ui.separator();
+            ui.horizontal(|ui| {
+                let tool = tools.get(self.params.tool_id).map_or("no tool", |assembly| assembly.name.as_str());
+                ui.label(RichText::new(format!("{} · {tool}", self.params.summary())).weak());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Cancel").clicked() {
+                        action = ContourAction::Cancel;
+                    }
+                    if ui.button("OK").clicked() {
+                        action = ContourAction::Accept;
+                    }
+                });
+            });
+            if let Some(error) = &self.error {
+                ui.colored_label(ERROR_COLOUR, error);
+            }
+        });
+        match action {
+            ContourAction::Accept => match self.accept() {
+                Ok(params) => Contour2DOutcome::Accept(Box::new(params)),
+                Err(error) => {
+                    self.error = Some(error.to_string());
+                    Contour2DOutcome::Open
+                }
+            },
+            ContourAction::Cancel => Contour2DOutcome::Cancel,
+            ContourAction::None => {
+                if modal.should_close() {
+                    Contour2DOutcome::Cancel
+                } else {
+                    Contour2DOutcome::Open
+                }
+            }
+        }
+    }
+
+    /// The title, and the entity and tool counts the operation has so far.
+    fn heading(&self, ui: &mut egui::Ui, tools: &ToolLibrary) {
+        ui.horizontal(|ui| {
+            ui.heading("2D Contour");
+            ui.separator();
+            let count = self.params.chain_len();
+            let noun = if count == 1 { "entity" } else { "entities" };
+            ui.label(RichText::new(format!("{count} chained {noun}")).weak());
+            ui.separator();
+            let tool = tools.get(self.params.tool_id).map_or("no tool", |assembly| assembly.name.as_str());
+            ui.label(RichText::new(tool).weak());
+        });
+    }
+
+    /// The `Geometry` page: every chainable curve of the document, ticked when chained.
+    fn geometry_page(&mut self, ui: &mut egui::Ui, document: &CamDocument) {
+        let entities = document.chain_entities();
+        ui.label(RichText::new("Geometry chaining").strong());
+        ui.label(RichText::new("Tick the curves the toolpath follows, in cutting order.").weak());
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            if ui.button("Select all").clicked() {
+                self.params.chain = entities.iter().map(|entity| entity.id).collect();
+            }
+            if ui.button("Clear").clicked() {
+                self.params.chain.clear();
+            }
+            let chained = self.params.chain_len();
+            ui.label(RichText::new(format!("{chained} of {} chained", entities.len())).weak());
+        });
+        ui.separator();
+        if entities.is_empty() {
+            ui.label(RichText::new("No wireframe on the visible, selectable levels. Draw or import geometry first.").weak());
+            return;
+        }
+        ScrollArea::vertical().id_salt("contour2d_chain").max_height(CONTOUR_PAGE_HEIGHT - 90.0).auto_shrink([false, false]).show(ui, |ui| {
+            for entity in &entities {
+                let mut chained = self.params.chain.contains(&entity.id);
+                let shape = if entity.is_closed() { "closed" } else { "open" };
+                let text = format!("E{} · level {} · {:.1} mm · {shape}", entity.id, entity.level, entity.length());
+                if ui.checkbox(&mut chained, text).changed() {
+                    if chained {
+                        self.params.chain.push(entity.id);
+                    } else {
+                        self.params.chain.retain(|id| *id != entity.id);
+                    }
+                    self.error = None;
+                }
+            }
+        });
+    }
+
+    /// The `Tool` page: the assembly the operation selects from the library.
+    fn tool_page(&mut self, ui: &mut egui::Ui, tools: &ToolLibrary) {
+        ui.label(RichText::new("Tool selection").strong());
+        ui.label(RichText::new("The operation cuts with this assembly from the tool library.").weak());
+        ui.add_space(2.0);
+        if tools.is_empty() {
+            ui.label(RichText::new("The tool library is empty. Add a tool in the Tool Library first.").weak());
+            return;
+        }
+        let chosen = tools.get(self.params.tool_id).map_or("(no tool)", |assembly| assembly.name.as_str());
+        row(ui, "Tool", |ui| {
+            egui::ComboBox::from_id_salt("contour_tool").selected_text(chosen).width(330.0).show_ui(ui, |ui| {
+                for assembly in tools.assemblies() {
+                    ui.selectable_value(&mut self.params.tool_id, assembly.id, format!("{} — {}", assembly.name, assembly.summary()));
+                }
+            });
+        });
+        ui.separator();
+        match tools.get(self.params.tool_id) {
+            Some(assembly) => {
+                let tool = &assembly.tool;
+                row(ui, "Type", |ui| {
+                    ui.label(tool.kind.label());
+                });
+                row(ui, "Diameter", |ui| {
+                    ui.label(format!("{:.2} mm", tool.diameter));
+                });
+                row(ui, "Corner radius", |ui| {
+                    ui.label(format!("{:.2} mm", tool.effective_corner_radius()));
+                });
+                row(ui, "Flute length", |ui| {
+                    ui.label(format!("{:.2} mm", tool.flute_length));
+                });
+                row(ui, "Flutes", |ui| {
+                    ui.label(tool.flutes.to_string());
+                });
+                let holder = assembly.holder.as_ref().map_or("none".to_string(), |holder| format!("{} · Ø{:.1} mm", holder.name, holder.diameter));
+                row(ui, "Holder", |ui| {
+                    ui.label(holder);
+                });
+                row(ui, "Stickout", |ui| {
+                    ui.label(format!("{:.2} mm", assembly.stickout));
+                });
+            }
+            None => {
+                ui.colored_label(ERROR_COLOUR, "No tool selected. Pick an assembly to cut with.");
+            }
+        }
+    }
+
+    /// The `Cut Parameters` page: compensation, cutter side and stock to leave.
+    fn cut_page(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Cut parameters").strong());
+        ui.add_space(2.0);
+        row(ui, "Compensation", |ui| {
+            if let Some(value) = choice(ui, "contour_comp", self.params.cut.compensation, &Compensation::ALL, Compensation::label) {
+                self.params.cut.compensation = value;
+            }
+        });
+        ui.label(
+            RichText::new(match self.params.cut.compensation {
+                Compensation::Computer => "Computer: the toolpath is offset in the program, with no compensation codes.",
+                Compensation::Control => "Control: the program names the chain and the machine applies the offset.",
+                Compensation::Off => "Off: the tool centre follows the chain.",
+            })
+            .weak(),
+        );
+        row(ui, "Direction", |ui| {
+            if let Some(value) = choice(ui, "contour_direction", self.params.cut.direction, &CutDirection::ALL, CutDirection::label) {
+                self.params.cut.direction = value;
+            }
+        });
+        ui.separator();
+        ui.label(RichText::new("Stock to leave").strong());
+        row(ui, "On walls", |ui| {
+            ui.add(egui::DragValue::new(&mut self.params.cut.stock_to_leave_walls).range(-100.0..=100.0).speed(0.05).suffix(" mm").fixed_decimals(2));
+        });
+        row(ui, "On floors", |ui| {
+            ui.add(
+                egui::DragValue::new(&mut self.params.cut.stock_to_leave_floors).range(-100.0..=100.0).speed(0.05).suffix(" mm").fixed_decimals(2),
+            );
+        });
+        ui.label(RichText::new("A positive value leaves material; a negative value removes more.").weak());
+    }
+
+    /// The `Depth Cuts` page: the rough step, the finish cuts and whether the tool stays down.
+    fn depth_page(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Depth cuts").strong());
+        ui.add_space(2.0);
+        row(ui, "Max rough step", |ui| {
+            ui.add(egui::DragValue::new(&mut self.params.depth_cuts.max_rough_step).range(0.01..=1000.0).speed(0.25).suffix(" mm").fixed_decimals(2));
+        });
+        ui.label(RichText::new("Equal rough cuts no larger than this divide the total depth.").weak());
+        ui.separator();
+        row(ui, "Finish cuts", |ui| {
+            ui.add(egui::DragValue::new(&mut self.params.depth_cuts.finish_cuts).range(0..=50).speed(0.2));
+        });
+        row(ui, "Finish step", |ui| {
+            ui.add(egui::DragValue::new(&mut self.params.depth_cuts.finish_step).range(0.0..=100.0).speed(0.05).suffix(" mm").fixed_decimals(2));
+        });
+        ui.label(RichText::new("Zero finish cuts leaves the rough step to reach the depth.").weak());
+        ui.separator();
+        ui.checkbox(&mut self.params.depth_cuts.keep_tool_down, "Keep tool down between depth cuts");
+        row(ui, "Order", |ui| {
+            if let Some(value) = choice(ui, "contour_depth_order", self.params.depth_cuts.order, &DepthOrder::ALL, DepthOrder::label) {
+                self.params.depth_cuts.order = value;
+            }
+        });
+    }
+
+    /// The `Multi Passes` page: the rough and finish passes across the wall.
+    fn multipass_page(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Multiple passes").strong());
+        ui.label(RichText::new("Step out from the wall and repeat the finish, all at the same depth.").weak());
+        ui.add_space(2.0);
+        row(ui, "Rough passes", |ui| {
+            ui.add(egui::DragValue::new(&mut self.params.multipasses.rough_passes).range(0..=100).speed(0.2));
+        });
+        row(ui, "Rough spacing", |ui| {
+            ui.add(egui::DragValue::new(&mut self.params.multipasses.rough_spacing).range(0.0..=100.0).speed(0.05).suffix(" mm").fixed_decimals(2));
+        });
+        ui.separator();
+        row(ui, "Finish passes", |ui| {
+            ui.add(egui::DragValue::new(&mut self.params.multipasses.finish_passes).range(0..=100).speed(0.2));
+        });
+        row(ui, "Finish spacing", |ui| {
+            ui.add(egui::DragValue::new(&mut self.params.multipasses.finish_spacing).range(0.0..=100.0).speed(0.05).suffix(" mm").fixed_decimals(2));
+        });
+        ui.separator();
+        row(ui, "Spring passes", |ui| {
+            ui.add(egui::DragValue::new(&mut self.params.multipasses.spring_passes).range(0..=100).speed(0.2));
+        });
+        ui.checkbox(&mut self.params.multipasses.keep_tool_down, "Keep tool down between passes");
+        ui.checkbox(&mut self.params.multipasses.finish_after_roughing, "Machine finish passes after roughing all contours");
+    }
+
+    /// The `Lead In/Out` page: how the tool enters and leaves the chain.
+    fn lead_page(&mut self, ui: &mut egui::Ui) {
+        self.lead_section(ui, "Entry", LeadSide::Entry);
+        ui.separator();
+        self.lead_section(ui, "Exit", LeadSide::Exit);
+        ui.separator();
+        ui.checkbox(&mut self.params.lead_in_out.entry_at_midpoint, "Enter/exit at midpoint in closed contours");
+        ui.checkbox(&mut self.params.lead_in_out.exit_on_last_depth_cut_only, "Exit on last depth cut only");
+    }
+
+    /// One lead move's fields: the kind, then the size the kind uses.
+    fn lead_section(&mut self, ui: &mut egui::Ui, title: &str, side: LeadSide) {
+        let lead: &mut LeadMove = match side {
+            LeadSide::Entry => &mut self.params.lead_in_out.entry,
+            LeadSide::Exit => &mut self.params.lead_in_out.exit,
+        };
+        ui.label(RichText::new(title).strong());
+        let id = match side {
+            LeadSide::Entry => "contour_lead_entry",
+            LeadSide::Exit => "contour_lead_exit",
+        };
+        row(ui, "Move", |ui| {
+            if let Some(kind) = choice(ui, id, lead.kind, &LeadKind::ALL, LeadKind::label) {
+                lead.kind = kind;
+            }
+        });
+        match lead.kind {
+            LeadKind::None => {
+                ui.label(RichText::new("The tool plunges on the chain itself.").weak());
+            }
+            LeadKind::Line => {
+                row(ui, "Line length", |ui| {
+                    ui.add(egui::DragValue::new(&mut lead.line_length).range(0.0..=100.0).speed(0.1).suffix(" mm").fixed_decimals(2));
+                });
+            }
+            LeadKind::Arc => {
+                row(ui, "Arc radius", |ui| {
+                    ui.add(egui::DragValue::new(&mut lead.arc_radius).range(0.0..=100.0).speed(0.1).suffix(" mm").fixed_decimals(2));
+                });
+                row(ui, "Sweep", |ui| {
+                    ui.add(egui::DragValue::new(&mut lead.arc_sweep_degrees).range(1.0..=180.0).speed(0.5).suffix(" °").fixed_decimals(1));
+                });
+            }
+        }
+    }
+
+    /// The `Linking Parameters` page: the heights the tool moves between.
+    fn linking_page(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Linking parameters").strong());
+        ui.add_space(2.0);
+        row(ui, "Mode", |ui| {
+            if let Some(value) = choice(ui, "contour_linking_mode", self.params.linking.mode, &LinkingMode::ALL, LinkingMode::label) {
+                self.params.linking.mode = value;
+            }
+        });
+        ui.label(
+            RichText::new(match self.params.linking.mode {
+                LinkingMode::Absolute => "Every height is an absolute Z coordinate.",
+                LinkingMode::Incremental => "Every height is measured from the top of stock.",
+            })
+            .weak(),
+        );
+        ui.separator();
+        row(ui, "Clearance", |ui| {
+            ui.add(egui::DragValue::new(&mut self.params.linking.clearance).range(-10_000.0..=10_000.0).speed(0.5).suffix(" mm").fixed_decimals(2));
+        });
+        row(ui, "Retract", |ui| {
+            ui.add(egui::DragValue::new(&mut self.params.linking.retract).range(-10_000.0..=10_000.0).speed(0.5).suffix(" mm").fixed_decimals(2));
+        });
+        row(ui, "Feed plane", |ui| {
+            ui.add(egui::DragValue::new(&mut self.params.linking.feed_plane).range(-10_000.0..=10_000.0).speed(0.5).suffix(" mm").fixed_decimals(2));
+        });
+        row(ui, "Top of stock", |ui| {
+            ui.add(
+                egui::DragValue::new(&mut self.params.linking.top_of_stock).range(-10_000.0..=10_000.0).speed(0.5).suffix(" mm").fixed_decimals(2),
+            );
+        });
+        row(ui, "Depth", |ui| {
+            ui.add(egui::DragValue::new(&mut self.params.linking.depth).range(-10_000.0..=10_000.0).speed(0.5).suffix(" mm").fixed_decimals(2));
+        });
+        ui.label(RichText::new("Clearance, retract, feed plane and top of stock stack in that order; the depth is below the stock.").weak());
+    }
+}
+
+/// One row of the modal's lists: the current choice, the options and whether the user changed it.
+fn choice<T: Copy + PartialEq>(ui: &mut egui::Ui, id: &str, current: T, all: &[T], label: impl Fn(T) -> &'static str) -> Option<T> {
+    let mut chosen = current;
+    egui::ComboBox::from_id_salt(id).selected_text(label(current)).width(220.0).show_ui(ui, |ui| {
+        for option in all {
+            ui.selectable_value(&mut chosen, *option, label(*option));
+        }
+    });
+    if chosen == current { None } else { Some(chosen) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -725,5 +1206,67 @@ mod tests {
             out.textures_delta.clear();
         }
         assert!(!primitives.is_empty(), "the dialog must draw something");
+    }
+
+    #[test]
+    fn the_contour_dialog_opens_on_geometry_and_refuses_an_unchained_operation() {
+        let dialog = Contour2DDialog::new(Contour2DParams::new(Vec::new(), 1));
+        assert_eq!(dialog.page(), ContourPage::Geometry);
+        assert_eq!(dialog.accept(), Err(Contour2DError::EmptyChain));
+        assert!(dialog.error().is_none(), "opening the dialog reports nothing until OK is pressed");
+    }
+
+    #[test]
+    fn the_contour_dialog_accepts_the_pages_it_edited() {
+        let mut dialog = Contour2DDialog::new(Contour2DParams::new(vec![2, 3], 4));
+        dialog.params_mut().depth_cuts.max_rough_step = 2.5;
+        dialog.params_mut().multipasses.rough_passes = 3;
+        dialog.params_mut().lead_in_out.entry = LeadMove { kind: LeadKind::Arc, arc_radius: 4.0, arc_sweep_degrees: 90.0, ..LeadMove::default() };
+        dialog.set_page(ContourPage::Linking);
+        let accepted = dialog.accept().unwrap_or_default();
+        assert_eq!(accepted.chain, [2, 3]);
+        assert_eq!(accepted.tool_id, 4);
+        assert!((accepted.depth_cuts.max_rough_step - 2.5).abs() < 1e-9);
+        assert_eq!(accepted.multipasses.rough_passes, 3);
+        assert_eq!(accepted.lead_in_out.entry.kind, LeadKind::Arc);
+    }
+
+    #[test]
+    fn the_contour_dialog_lists_all_seven_parameter_pages() {
+        assert_eq!(
+            ContourPage::ALL.map(ContourPage::label),
+            ["Geometry", "Tool", "Cut Parameters", "Depth Cuts", "Multi Passes", "Lead In/Out", "Linking"]
+        );
+    }
+
+    #[test]
+    fn the_contour_dialog_draws_every_page() {
+        let document = plate_document();
+        let tools = ToolLibrary::with_presets();
+        let ctx = egui::Context::default();
+        let chain: Vec<usize> = document.chain_entities().iter().map(|entity| entity.id).collect();
+        let mut dialog = Contour2DDialog::new(Contour2DParams::new(chain, 1));
+        for page in ContourPage::ALL {
+            dialog.set_page(page);
+            // The first frame lays the modal's area out; the next one paints it.
+            let mut primitives = Vec::new();
+            for _ in 0..2 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(input, |_ui| {
+                    assert_eq!(
+                        dialog.ui(&ctx, &document, &tools),
+                        Contour2DOutcome::Open,
+                        "a frame with no click leaves the {} page open",
+                        page.label()
+                    );
+                });
+                primitives = ctx.tessellate(out.shapes, out.pixels_per_point);
+                out.textures_delta.clear();
+            }
+            assert!(!primitives.is_empty(), "the {} page must draw something", page.label());
+        }
     }
 }
