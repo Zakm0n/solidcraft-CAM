@@ -704,6 +704,8 @@ dependencies = [
  "eframe",
  "egui",
  "image",
+ "solidcore-record",
+ "solidcraft-render",
 ]
 
 [[package]]

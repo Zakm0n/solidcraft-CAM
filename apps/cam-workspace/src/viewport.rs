@@ -1,0 +1,463 @@
+//! The 3D viewport: an orbit camera over a scene, the controls that move it, and the overlays
+//! that tell the user where they are.
+//!
+//! The picture is drawn by SolidCraft's render crate ([`solidcraft_render`]): the same
+//! [`Camera`], scene description and rasteriser the headless snapshots use, so the window and
+//! the screenshot harness show the same image. The scene is rebuilt whenever the camera or the
+//! viewport changes and uploaded to egui as one texture; a still view costs nothing.
+//!
+//! Until the document arrives (later phases) the scene is the workspace floor: the ground grid,
+//! the origin gnomon and the scale bar. Toolpath moves, stock and bodies are added to the same
+//! scene by the phases that create them.
+
+use egui::{Align2, Color32, FontId, PointerButton, Rect, Sense, Stroke, TextureHandle, Ui, Vec2};
+use solidcore_record::Vec3;
+use solidcraft_render::{Camera, Rgb, Scene, SceneLine, StandardView, render};
+
+/// Background gradient of the viewport, top and bottom: the light workspace the shell uses.
+pub const BACKGROUND_TOP: Rgb = Rgb(240, 243, 247);
+pub const BACKGROUND_BOTTOM: Rgb = Rgb(203, 210, 221);
+
+/// The ground grid's minor and major line colours.
+pub const GRID_MINOR: Rgb = Rgb(196, 202, 212);
+pub const GRID_MAJOR: Rgb = Rgb(170, 178, 190);
+
+/// The origin axes: X, Y and Z, the same colours every SolidCraft view draws them in.
+pub const AXIS_X: Rgb = Rgb(220, 60, 60);
+pub const AXIS_Y: Rgb = Rgb(60, 170, 60);
+pub const AXIS_Z: Rgb = Rgb(60, 100, 230);
+
+/// How far the ground grid reaches from the origin, in mm, on each axis.
+pub const GRID_EXTENT: f64 = 250.0;
+
+/// Spacing of the grid's fine lines, in mm.
+pub const GRID_STEP: f64 = 10.0;
+
+/// Every fifth grid line is a major one, in mm.
+pub const GRID_MAJOR_STEP: f64 = GRID_STEP * 5.0;
+
+/// Length of the gnomon's three arms, in mm.
+pub const GNOMON_LENGTH: f64 = 60.0;
+
+/// Radius the camera clips against: the grid's own bounds with room to spare, so orbiting never
+/// clips the floor away.
+pub const SCENE_RADIUS: f64 = GRID_EXTENT * 1.5;
+
+/// The camera's distance in the home view, in mm: the whole ground grid fits across the window.
+pub const HOME_DISTANCE: f64 = 600.0;
+
+/// How fast the wheel zooms: the exponential rate per point scrolled.
+pub const ZOOM_SPEED: f64 = 0.002;
+
+/// The scale bar aims for about this many points of length; the nearest 1-2-5 value wins.
+pub const SCALE_BAR_TARGET_WIDTH: f32 = 120.0;
+
+/// Largest side the viewport is rasterised at, in pixels: a picture bigger than this costs more
+/// than it shows (the rasteriser already supersamples 2×).
+pub const MAX_RENDER_SIDE: u32 = 1600;
+
+/// One frame's worth of camera movement, in points (orbit and pan) and wheel points (zoom).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ViewInput {
+    /// Drag delta that orbits the camera, in points.
+    pub orbit: Vec2,
+    /// Drag delta that pans the camera, in points.
+    pub pan: Vec2,
+    /// Wheel delta: positive (the wheel turned away) zooms in.
+    pub zoom: f32,
+}
+
+impl ViewInput {
+    /// Whether the input asks the camera to move at all.
+    pub fn is_idle(self) -> bool {
+        self.orbit == Vec2::ZERO && self.pan == Vec2::ZERO && self.zoom == 0.0
+    }
+}
+
+/// The 3D viewport: camera, scene and overlays.
+pub struct Viewport {
+    /// The orbit camera the scene is drawn through.
+    pub camera: Camera,
+    /// The last picture uploaded to egui, with what it was rendered from.
+    picture: Option<Rendered>,
+}
+
+/// An uploaded picture and the state it shows: re-rendering is skipped while this matches.
+#[derive(Clone)]
+struct Rendered {
+    key: RenderKey,
+    texture: TextureHandle,
+}
+
+/// What a picture depends on: the camera and the pixel size. The scene is deterministic.
+#[derive(Clone, Copy, PartialEq)]
+struct RenderKey {
+    camera: Camera,
+    width: u32,
+    height: u32,
+}
+
+impl Default for Viewport {
+    fn default() -> Self {
+        Self { camera: home_camera(), picture: None }
+    }
+}
+
+impl std::fmt::Debug for Viewport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Viewport").field("camera", &self.camera).field("rendered", &self.picture.is_some()).finish()
+    }
+}
+
+/// The camera a new workspace, or Home, starts from: the isometric view of the origin from far
+/// enough out that the whole ground grid is in view.
+pub fn home_camera() -> Camera {
+    let mut camera = Camera::default();
+    camera.set_view(StandardView::Iso);
+    camera.target = Vec3::ZERO;
+    camera.distance = HOME_DISTANCE;
+    camera
+}
+
+/// The ground grid of the XY plane, centred on the origin: fine lines every [`GRID_STEP`] and a
+/// major line every [`GRID_MAJOR_STEP`]. The axes' own lines are the gnomon's, so the zeros are
+/// left out.
+pub fn grid_lines() -> Vec<SceneLine> {
+    let mut lines = Vec::new();
+    let steps = (GRID_EXTENT / GRID_STEP).floor() as i64;
+    for i in -steps..=steps {
+        if i == 0 {
+            continue;
+        }
+        let at = i as f64 * GRID_STEP;
+        let major = (at / GRID_MAJOR_STEP).fract().abs() < 1e-9;
+        let (color, width) = if major { (GRID_MAJOR, 1.4) } else { (GRID_MINOR, 1.0) };
+        // Parallel to X, then parallel to Y.
+        lines.push(SceneLine {
+            points: vec![Vec3::new(-GRID_EXTENT, at, 0.0), Vec3::new(GRID_EXTENT, at, 0.0)],
+            color,
+            alpha: 1.0,
+            width,
+            on_top: false,
+        });
+        lines.push(SceneLine {
+            points: vec![Vec3::new(at, -GRID_EXTENT, 0.0), Vec3::new(at, GRID_EXTENT, 0.0)],
+            color,
+            alpha: 1.0,
+            width,
+            on_top: false,
+        });
+    }
+    lines
+}
+
+/// The origin gnomon: the three positive axes as solid lines, X red, Y green, Z blue. Their
+/// labels are painted in screen space by the viewport, so they stay readable at any distance.
+pub fn gnomon_lines() -> [SceneLine; 3] {
+    let arm = |color: Rgb, axis: Vec3| SceneLine { points: vec![Vec3::ZERO, axis * GNOMON_LENGTH], color, alpha: 1.0, width: 2.5, on_top: true };
+    [arm(AXIS_X, Vec3::new(1.0, 0.0, 0.0)), arm(AXIS_Y, Vec3::new(0.0, 1.0, 0.0)), arm(AXIS_Z, Vec3::new(0.0, 0.0, 1.0))]
+}
+
+/// The scene the viewport draws now: the background, the ground grid and the gnomon.
+pub fn scene() -> Scene {
+    let mut scene = Scene { background: Some((BACKGROUND_TOP, BACKGROUND_BOTTOM)), radius: SCENE_RADIUS, ..Scene::default() };
+    scene.grid = grid_lines();
+    scene.lines = gnomon_lines().into_iter().collect();
+    scene
+}
+
+/// The largest 1, 2 or 5 times a power of ten that is no bigger than `raw`: the length a scale
+/// bar is drawn at, so its label is always a number a person reads at a glance.
+pub fn nice_length(raw: f64) -> f64 {
+    if !raw.is_finite() || !(raw > 0.0) {
+        return 1.0;
+    }
+    let magnitude = 10f64.powf(raw.log10().floor());
+    for factor in [5.0, 2.0, 1.0] {
+        let candidate = factor * magnitude;
+        if candidate <= raw + 1e-12 {
+            return candidate;
+        }
+    }
+    magnitude
+}
+
+/// A length in millimetres as the scale bar labels it: whole numbers above 1 mm, one decimal
+/// below.
+pub fn format_length(length: f64) -> String {
+    if length >= 1.0 { format!("{length:.0} mm") } else { format!("{length:.1} mm") }
+}
+
+/// A colour of the render crate as the shell paints it.
+fn colour(rgb: Rgb) -> Color32 {
+    Color32::from_rgb(rgb.0, rgb.1, rgb.2)
+}
+
+impl Viewport {
+    /// Applies one frame's camera input: orbit, pan and zoom, each only when it moved.
+    pub fn apply(&mut self, input: ViewInput, viewport_height: f32) {
+        let (orbit, pan, zoom) = (input.orbit, input.pan, input.zoom);
+        if orbit != Vec2::ZERO {
+            self.camera.orbit(f64::from(orbit.x), f64::from(orbit.y));
+        }
+        if pan != Vec2::ZERO {
+            self.camera.pan(f64::from(pan.x), f64::from(pan.y), f64::from(viewport_height));
+        }
+        if zoom != 0.0 && zoom.is_finite() {
+            self.camera.zoom_at((-f64::from(zoom) * ZOOM_SPEED).exp(), None);
+        }
+    }
+
+    /// The home view: the whole grid, iso, centred on the origin.
+    pub fn home(&mut self) {
+        self.camera = home_camera();
+    }
+
+    /// World length one screen point covers at the camera's target: the scale bar's unit.
+    pub fn world_per_point(&self, viewport_height: f32) -> f64 {
+        let height = f64::from(viewport_height).max(1.0);
+        2.0 * self.camera.half_height() / height
+    }
+
+    /// The camera input the pointer and wheel ask for in `rect`.
+    fn read_input(ui: &Ui, response: &egui::Response) -> ViewInput {
+        let mut input = ViewInput::default();
+        if response.dragged() {
+            // Any drag with Shift, and a right drag, pans; every other button orbits (the CAD
+            // convention: drag to tumble, Shift-drag to slide the part).
+            let pan = response.dragged_by(PointerButton::Secondary) || ui.input(|i| i.modifiers.shift);
+            if pan {
+                input.pan = response.drag_delta();
+            } else {
+                input.orbit = response.drag_delta();
+            }
+        }
+        if response.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                input.zoom = scroll;
+            }
+        }
+        input
+    }
+
+    /// Draws the viewport into the space `ui` has left: the picture, the gnomon labels, the
+    /// view controls and the scale bar.
+    pub fn ui(&mut self, ui: &mut Ui) {
+        let rect = ui.available_rect_before_wrap();
+        if rect.width() < 1.0 || rect.height() < 1.0 {
+            return;
+        }
+        let response = ui.allocate_rect(rect, Sense::click_and_drag());
+        let input = Self::read_input(ui, &response);
+        self.apply(input, rect.height());
+        if response.double_clicked() {
+            self.home();
+        }
+        self.refresh(ui, rect);
+
+        if let Some(picture) = &self.picture {
+            let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            ui.painter().image(picture.texture.id(), rect, uv, Color32::WHITE);
+        }
+        self.paint_gnomon_labels(ui, rect);
+        self.paint_scale_bar(ui, rect);
+        // Last, so the controls sit over the picture rather than under it.
+        self.view_controls(ui, rect);
+    }
+
+    /// The view controls overlaid in the viewport's top-left corner: Home and the axis views.
+    fn view_controls(&mut self, ui: &mut Ui, rect: Rect) {
+        let bar = Rect::from_min_size(rect.left_top() + Vec2::new(8.0, 8.0), Vec2::new((rect.width() - 16.0).max(1.0), 22.0));
+        ui.scope_builder(egui::UiBuilder::new().id_salt("viewport_view_controls").max_rect(bar), |ui| {
+            ui.horizontal(|ui| {
+                if ui.small_button("Home").on_hover_text("Home view (double-click the viewport)").clicked() {
+                    self.home();
+                }
+                for (label, view, hint) in [
+                    ("Top", StandardView::Top, "Look down the Z axis"),
+                    ("Front", StandardView::Front, "Look along the Y axis"),
+                    ("Right", StandardView::Right, "Look along the X axis"),
+                ] {
+                    if ui.small_button(label).on_hover_text(hint).clicked() {
+                        self.camera.set_view(view);
+                    }
+                }
+            });
+        });
+    }
+
+    /// Re-renders the picture when the camera or the viewport changed, and uploads it. The
+    /// picture is drawn at the screen's pixel density, up to [`MAX_RENDER_SIDE`].
+    fn refresh(&mut self, ui: &Ui, rect: Rect) {
+        let ppp = ui.ctx().pixels_per_point().clamp(0.5, 4.0);
+        let width = ((rect.width() * ppp).round() as u32).clamp(1, MAX_RENDER_SIDE);
+        let height = ((rect.height() * ppp).round() as u32).clamp(1, MAX_RENDER_SIDE);
+        let key = RenderKey { camera: self.camera, width, height };
+        if self.picture.as_ref().is_some_and(|picture| picture.key == key) {
+            return;
+        }
+        let canvas = render(&scene(), &self.camera, width as usize, height as usize);
+        let image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &canvas.rgba);
+        let texture = ui.ctx().load_texture("cam_viewport", image, egui::TextureOptions::LINEAR);
+        self.picture = Some(Rendered { key, texture });
+    }
+
+    /// The X, Y and Z labels at the gnomon's tips, projected through the camera.
+    fn paint_gnomon_labels(&self, ui: &Ui, rect: Rect) {
+        let painter = ui.painter();
+        let (width, height) = (f64::from(rect.width()), f64::from(rect.height()));
+        for (label, axis, rgb) in
+            [("X", Vec3::new(1.0, 0.0, 0.0), AXIS_X), ("Y", Vec3::new(0.0, 1.0, 0.0), AXIS_Y), ("Z", Vec3::new(0.0, 0.0, 1.0), AXIS_Z)]
+        {
+            let tip = axis * (GNOMON_LENGTH * 1.1);
+            let Some((x, y, _)) = self.camera.to_screen(tip, width, height, SCENE_RADIUS) else { continue };
+            let at = rect.min + Vec2::new(x as f32, y as f32);
+            painter.text(at, Align2::CENTER_CENTER, label, FontId::proportional(13.0), colour(rgb));
+        }
+    }
+
+    /// The scale bar in the bottom-right corner: a 1-2-5 length that is close to
+    /// [`SCALE_BAR_TARGET_WIDTH`] points wide, labelled in millimetres.
+    fn paint_scale_bar(&self, ui: &Ui, rect: Rect) {
+        let world_per_point = self.world_per_point(rect.height());
+        if !world_per_point.is_finite() || !(world_per_point > 0.0) {
+            return;
+        }
+        let length = nice_length(world_per_point * f64::from(SCALE_BAR_TARGET_WIDTH));
+        let width = (length / world_per_point) as f32;
+        if !width.is_finite() || width < 1.0 {
+            return;
+        }
+        let painter = ui.painter();
+        let inset = 16.0;
+        let right = rect.right() - inset;
+        let left = (right - width).max(rect.left() + inset);
+        let base = rect.bottom() - inset;
+        let stroke = Stroke::new(1.5, Color32::from_rgb(60, 70, 85));
+        painter.line_segment([egui::pos2(left, base), egui::pos2(right, base)], stroke);
+        for x in [left, right] {
+            painter.line_segment([egui::pos2(x, base), egui::pos2(x, base - 6.0)], stroke);
+        }
+        painter.text(
+            egui::pos2(right, base - 8.0),
+            Align2::RIGHT_BOTTOM,
+            format_length(length),
+            FontId::proportional(12.0),
+            Color32::from_rgb(45, 55, 70),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_home_view_is_isometric_and_frames_the_whole_grid() {
+        let viewport = Viewport::default();
+        assert_eq!(viewport.camera, home_camera());
+        assert!((viewport.camera.distance - HOME_DISTANCE).abs() < 1e-9);
+        assert_eq!(viewport.camera.target, Vec3::ZERO);
+        assert_eq!(viewport.camera.fov, 0.0, "the workspace starts orthographic");
+        // The visible height at the home distance covers the grid with room to spare.
+        assert!(2.0 * viewport.camera.half_height() > GRID_EXTENT);
+    }
+
+    #[test]
+    fn orbiting_turns_the_camera_about_its_target() {
+        let mut viewport = Viewport::default();
+        let (yaw, pitch) = (viewport.camera.yaw, viewport.camera.pitch);
+        viewport.apply(ViewInput { orbit: Vec2::new(40.0, 12.0), ..ViewInput::default() }, 600.0);
+        assert!((viewport.camera.yaw - yaw).abs() > 1e-6, "a horizontal drag turns the view");
+        assert!((viewport.camera.pitch - pitch).abs() > 1e-6, "a vertical drag tilts the view");
+        assert_eq!(viewport.camera.target, Vec3::ZERO, "an orbit keeps the target");
+    }
+
+    #[test]
+    fn panning_moves_the_target_without_turning_the_view() {
+        let mut viewport = Viewport::default();
+        let (yaw, pitch, distance) = (viewport.camera.yaw, viewport.camera.pitch, viewport.camera.distance);
+        viewport.apply(ViewInput { pan: Vec2::new(30.0, -20.0), ..ViewInput::default() }, 600.0);
+        assert_ne!(viewport.camera.target, Vec3::ZERO);
+        assert_eq!((viewport.camera.yaw, viewport.camera.pitch, viewport.camera.distance), (yaw, pitch, distance));
+    }
+
+    #[test]
+    fn the_wheel_zooms_in_and_out_around_the_target() {
+        let mut viewport = Viewport::default();
+        let distance = viewport.camera.distance;
+        viewport.apply(ViewInput { zoom: 120.0, ..ViewInput::default() }, 600.0);
+        assert!(viewport.camera.distance < distance, "the wheel turned away zooms in");
+        let close = viewport.camera.distance;
+        viewport.apply(ViewInput { zoom: -120.0, ..ViewInput::default() }, 600.0);
+        assert!(viewport.camera.distance > close, "the wheel turned toward the user zooms out");
+        assert_eq!(viewport.camera.target, Vec3::ZERO);
+    }
+
+    #[test]
+    fn idle_input_leaves_the_camera_alone() {
+        let mut viewport = Viewport::default();
+        let camera = viewport.camera;
+        viewport.apply(ViewInput::default(), 600.0);
+        assert_eq!(viewport.camera, camera);
+        assert!(ViewInput::default().is_idle());
+    }
+
+    #[test]
+    fn the_ground_grid_covers_the_origin_with_major_lines_every_fifth() {
+        let lines = grid_lines();
+        assert_eq!(lines.len(), 100, "ten steps each way, both directions, without the axes' zeros");
+        let majors = lines.iter().filter(|line| line.color == GRID_MAJOR).count();
+        assert_eq!(majors, 20, "one line in five is major, in both directions");
+        assert!(lines.iter().all(|line| line.points.iter().all(|p| p.z == 0.0)));
+    }
+
+    #[test]
+    fn the_gnomon_draws_the_three_positive_axes_at_the_origin() {
+        let lines = gnomon_lines();
+        assert_eq!(lines.len(), 3);
+        for (line, (axis, rgb)) in lines.iter().zip([
+            (Vec3::new(GNOMON_LENGTH, 0.0, 0.0), AXIS_X),
+            (Vec3::new(0.0, GNOMON_LENGTH, 0.0), AXIS_Y),
+            (Vec3::new(0.0, 0.0, GNOMON_LENGTH), AXIS_Z),
+        ]) {
+            assert_eq!(line.points, [Vec3::ZERO, axis]);
+            assert_eq!(line.color, rgb);
+            assert!(line.on_top, "the gnomon reads over the grid");
+        }
+    }
+
+    #[test]
+    fn the_scene_draws_the_grid_and_the_gnomon() {
+        let scene = scene();
+        assert_eq!(scene.grid.len(), 100);
+        assert_eq!(scene.lines.len(), 3);
+        assert_eq!(scene.background, Some((BACKGROUND_TOP, BACKGROUND_BOTTOM)));
+        assert_eq!(scene.radius, SCENE_RADIUS);
+    }
+
+    #[test]
+    fn scale_bar_lengths_are_one_two_or_five() {
+        for (raw, expected) in [(9.9, 5.0), (12.0, 10.0), (20.0, 20.0), (480.0, 200.0), (0.7, 0.5)] {
+            assert_eq!(nice_length(raw), expected, "raw {raw}");
+        }
+        assert_eq!(nice_length(f64::NAN), 1.0);
+        assert_eq!(nice_length(0.0), 1.0);
+    }
+
+    #[test]
+    fn the_scale_bar_width_stays_near_its_target() {
+        let viewport = Viewport::default();
+        let height = 600.0;
+        let world_per_point = viewport.world_per_point(height);
+        let width = nice_length(world_per_point * f64::from(SCALE_BAR_TARGET_WIDTH)) / world_per_point;
+        assert!(width > 24.0 && width <= f64::from(SCALE_BAR_TARGET_WIDTH), "bar {width} points wide");
+    }
+
+    #[test]
+    fn lengths_are_labelled_in_millimetres() {
+        assert_eq!(format_length(50.0), "50 mm");
+        assert_eq!(format_length(0.5), "0.5 mm");
+    }
+}

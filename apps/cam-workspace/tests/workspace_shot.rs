@@ -52,6 +52,31 @@ fn the_workspace_shot_shows_the_unified_manager() {
     assert!(colours.len() > 16, "the shot must show drawn UI, got {} colours", colours.len());
 }
 
+/// Pixels of the central region: the columns right of the manager panel.
+fn viewport_pixels(image: &image::RgbaImage) -> impl Iterator<Item = &image::Rgba<u8>> {
+    let width = image.width().max(1);
+    let left = (LEFT_PANEL_WIDTH as u32 + 40).min(width);
+    image.pixels().enumerate().filter(move |(i, _)| (*i as u32 % width) >= left).map(|(_, pixel)| pixel)
+}
+
+#[test]
+fn the_shot_shows_the_live_3d_viewport() {
+    let image = shot("cam-workspace", ManagerTab::Levels);
+    // The gnomon's X arm is red and the ground grid is grey; a placeholder frame had neither.
+    let (mut red, mut grey) = (0usize, 0usize);
+    for pixel in viewport_pixels(&image) {
+        let [r, g, b, _] = pixel.0;
+        if r > 150 && g < 110 && b < 110 {
+            red += 1;
+        }
+        if (150..=215).contains(&r) && (150..=215).contains(&g) && (150..=215).contains(&b) {
+            grey += 1;
+        }
+    }
+    assert!(red > 50, "the gnomon's X arm is drawn, got {red} red pixels");
+    assert!(grey > 1000, "the ground grid is drawn, got {grey} grey pixels");
+}
+
 #[test]
 fn every_manager_tab_renders_its_view() {
     for (name, tab) in [

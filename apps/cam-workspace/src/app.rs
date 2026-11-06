@@ -4,9 +4,10 @@
 //! their space first, then the unified left manager panels the model, and the central panel keeps
 //! whatever remains for the 3D viewport.
 
-use egui::{Align, Color32, Layout, RichText};
+use egui::{Align, Color32, Layout};
 
 use crate::left_manager::{ACTIVE_HIGHLIGHT_LIGHT, ACTIVE_HIGHLIGHT_TEXT, LeftManager};
+use crate::viewport::Viewport;
 
 /// Background of the 3D viewport (light grey-blue), so the region reserved for graphics reads as
 /// workspace instead of unrendered black.
@@ -95,6 +96,8 @@ pub struct CamWorkspaceApp {
     active_ribbon_tab: RibbonTab,
     /// The unified left manager: levels, toolpaths, planes and solids.
     pub manager: LeftManager,
+    /// The 3D viewport: the camera, the scene it draws and its overlays.
+    pub viewport: Viewport,
 }
 
 impl CamWorkspaceApp {
@@ -168,11 +171,9 @@ impl CamWorkspaceApp {
         Self::status_bar(ui);
         self.manager_panel(ui);
 
-        // Last, so that it fills what the panels leave over.
+        // Last, so that it fills what the panels leave over: the live 3D viewport.
         egui::CentralPanel::default().frame(egui::Frame::new().fill(VIEWPORT_BACKGROUND)).show(ui, |ui| {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new("3D viewport").weak());
-            });
+            self.viewport.ui(ui);
         });
     }
 }
