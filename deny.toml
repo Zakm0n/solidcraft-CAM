@@ -1,0 +1,17 @@
+# Licences remain covered by `cargo xtask licences --check`.
+[advisories]
+# The nightly command downgrades only this diagnostic with --warn unmaintained.
+unmaintained = "all"
+yanked = "warn"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# solidcore, pinned by rev in Cargo.toml (the kernel behind crates/smlib).
+allow-git = ["https://github.com/tangency-labs/solidcore"]

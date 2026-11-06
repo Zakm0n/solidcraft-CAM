@@ -1,0 +1,18 @@
+[package]
+name = "cam-workspace"
+description = "CAM workspace: ribbon, manager panels and 3D viewport (eframe)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# default_fonts: text renders without an installed system font.
+# wgpu: the hardware-accelerated renderer; wayland/x11: the Linux window backends.
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+egui = { workspace = true }
