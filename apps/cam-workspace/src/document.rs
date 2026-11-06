@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use solidcore_record::{Plane, Region2, Vec2, Vec3};
+use solidcraft_cam::operations::contour2d::ChainCurve;
 use solidcraft_cam::stock::StockDef;
 use solidcraft_geom::Mesh;
 use solidcraft_geom::PlaneGeom;
@@ -650,6 +651,18 @@ impl CamDocument {
     /// Whether a level's geometry can be picked.
     pub fn level_selectable(&self, id: usize) -> bool {
         self.level(id).is_some_and(|level| level.selectable)
+    }
+
+    /// The geometry of the chain `ids` names, in the cutting order the operation stored.
+    ///
+    /// Ids the document no longer holds are left out, so a chain whose geometry was deleted
+    /// hands the toolpath calculation a shorter chain rather than a hole in it.
+    pub fn chain_curves(&self, ids: &[usize]) -> Vec<ChainCurve> {
+        let entities = self.chain_entities();
+        ids.iter()
+            .filter_map(|id| entities.iter().find(|entity| entity.id == *id))
+            .map(|entity| ChainCurve { id: entity.id, points: entity.points.iter().map(|point| [point.x, point.y, point.z]).collect() })
+            .collect()
     }
 
     /// Gives every curve of `index` that does not have an id yet the next document id.

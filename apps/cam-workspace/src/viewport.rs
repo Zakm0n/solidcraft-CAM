@@ -14,7 +14,9 @@ use std::sync::Arc;
 
 use egui::{Align2, Color32, FontId, PointerButton, Rect, Sense, Stroke, TextureHandle, Ui, Vec2};
 use solidcore_record::Vec3;
+use solidcraft_cam::operations::Operation;
 use solidcraft_cam::stock::StockDef;
+use solidcraft_cam::toolpath::MoveKind;
 use solidcraft_geom::Mesh;
 use solidcraft_render::{Camera, Rgb, Scene, SceneLine, SceneMesh, StandardView, render};
 
@@ -50,6 +52,17 @@ pub const STOCK_EDGE_ALPHA: f32 = 0.75;
 
 /// Width of the stock box's edges, in output pixels.
 pub const STOCK_EDGE_WIDTH: f64 = 1.4;
+
+/// The toolpath's rapid moves: the blueprint's yellow, so G0 reads at a glance against the light
+/// workspace.
+pub const TOOLPATH_RAPID: Rgb = Rgb(255, 255, 0);
+
+/// The toolpath's feed moves: the blueprint's cyan, for G1, G2 and G3 alike.
+pub const TOOLPATH_FEED: Rgb = Rgb(0, 255, 255);
+
+/// Width of a toolpath line, in output pixels: a cutting move is drawn on top of the model, so
+/// it reads over the wireframe and the stock without hiding them.
+pub const TOOLPATH_WIDTH: f64 = 1.8;
 
 /// The origin axes: X, Y and Z, the same colours every SolidCraft view draws them in.
 pub const AXIS_X: Rgb = Rgb(220, 60, 60);
@@ -118,14 +131,16 @@ struct Rendered {
     texture: TextureHandle,
 }
 
-/// What a picture depends on: the camera, the pixel size and the document revision. The scene is
-/// deterministic, so those three decide whether the picture must be drawn again.
+/// What a picture depends on: the camera, the pixel size, the document revision and the
+/// toolpaths' revisions. The scene is deterministic, so those decide whether the picture must be
+/// drawn again.
 #[derive(Clone, Copy, PartialEq)]
 struct RenderKey {
     camera: Camera,
     width: u32,
     height: u32,
     revision: u64,
+    toolpaths: u64,
 }
 
 impl Default for Viewport {
@@ -245,14 +260,15 @@ pub fn stock_box_lines(extents: [f64; 6]) -> Vec<SceneLine> {
 }
 
 /// The scene the viewport draws: the background, the ground grid, the gnomon, the visible
-/// levels' wireframe, the visible solids and the stock.
-pub fn scene(document: &CamDocument) -> Scene {
+/// levels' wireframe, the visible operations' toolpaths, the visible solids and the stock.
+pub fn scene(document: &CamDocument, operations: &[Operation]) -> Scene {
     let mut scene = Scene { background: Some((BACKGROUND_TOP, BACKGROUND_BOTTOM)), radius: SCENE_RADIUS, ..Scene::default() };
     scene.grid = grid_lines();
     let mut lines: Vec<SceneLine> = gnomon_lines().into_iter().collect();
     for wire in document.wireframe_lines() {
         lines.push(SceneLine { points: wire.points, color: WIREFRAME, alpha: 1.0, width: 1.6, on_top: true });
     }
+    lines.extend(toolpath_lines(operations));
     let mut meshes: Vec<SceneMesh> = document
         .solids()
         .iter()
@@ -282,6 +298,40 @@ pub fn scene(document: &CamDocument) -> Scene {
     scene.lines = lines;
     scene.meshes = meshes;
     scene
+}
+
+/// The visible operations' moves as scene lines: every move its own polyline, in the rapid
+/// yellow or the feed cyan, drawn over the model.
+pub fn toolpath_lines(operations: &[Operation]) -> Vec<SceneLine> {
+    let mut lines = Vec::new();
+    for operation in operations.iter().filter(|operation| operation.visible) {
+        for (kind, points) in operation.toolpath.segments() {
+            if points.len() < 2 {
+                continue;
+            }
+            let colour = match kind {
+                MoveKind::Rapid => TOOLPATH_RAPID,
+                MoveKind::Feed => TOOLPATH_FEED,
+            };
+            lines.push(SceneLine {
+                points: points.into_iter().map(|point| Vec3::new(point[0], point[1], point[2])).collect(),
+                color: colour,
+                alpha: 1.0,
+                width: TOOLPATH_WIDTH,
+                on_top: true,
+            });
+        }
+    }
+    lines
+}
+
+/// The revision of what the toolpaths contribute to the picture: each operation's own revision
+/// and its visibility decide whether the viewport must draw the scene again.
+pub fn toolpaths_key(operations: &[Operation]) -> u64 {
+    operations.iter().fold(0, |key, operation| {
+        let visible = u64::from(operation.visible);
+        key.rotate_left(9) ^ operation.revision.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ visible
+    })
 }
 
 /// The largest 1, 2 or 5 times a power of ten that is no bigger than `raw`: the length a scale
@@ -372,7 +422,7 @@ impl Viewport {
 
     /// Draws the viewport into the space `ui` has left: the picture, the gnomon labels, the
     /// view controls and the scale bar.
-    pub fn ui(&mut self, ui: &mut Ui, document: &CamDocument) {
+    pub fn ui(&mut self, ui: &mut Ui, document: &CamDocument, operations: &[Operation]) {
         let rect = ui.available_rect_before_wrap();
         if rect.width() < 1.0 || rect.height() < 1.0 {
             return;
@@ -383,7 +433,7 @@ impl Viewport {
         if response.double_clicked() {
             self.home();
         }
-        self.refresh(ui, rect, document);
+        self.refresh(ui, rect, document, operations);
 
         if let Some(picture) = &self.picture {
             let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -418,15 +468,15 @@ impl Viewport {
 
     /// Re-renders the picture when the camera or the viewport changed, and uploads it. The
     /// picture is drawn at the screen's pixel density, up to [`MAX_RENDER_SIDE`].
-    fn refresh(&mut self, ui: &Ui, rect: Rect, document: &CamDocument) {
+    fn refresh(&mut self, ui: &Ui, rect: Rect, document: &CamDocument, operations: &[Operation]) {
         let ppp = ui.ctx().pixels_per_point().clamp(0.5, 4.0);
         let width = ((rect.width() * ppp).round() as u32).clamp(1, MAX_RENDER_SIDE);
         let height = ((rect.height() * ppp).round() as u32).clamp(1, MAX_RENDER_SIDE);
-        let key = RenderKey { camera: self.camera, width, height, revision: document.revision() };
+        let key = RenderKey { camera: self.camera, width, height, revision: document.revision(), toolpaths: toolpaths_key(operations) };
         if self.picture.as_ref().is_some_and(|picture| picture.key == key) {
             return;
         }
-        let canvas = render(&scene(document), &self.camera, width as usize, height as usize);
+        let canvas = render(&scene(document, operations), &self.camera, width as usize, height as usize);
         let image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &canvas.rgba);
         let texture = ui.ctx().load_texture("cam_viewport", image, egui::TextureOptions::LINEAR);
         self.picture = Some(Rendered { key, texture });
@@ -560,7 +610,7 @@ mod tests {
     #[test]
     fn the_scene_draws_the_grid_and_the_gnomon() {
         let document = CamDocument::default();
-        let scene = scene(&document);
+        let scene = scene(&document, &[]);
         assert_eq!(scene.grid.len(), 100);
         assert_eq!(scene.lines.len(), 3);
         assert!(scene.meshes.is_empty(), "an empty document draws no bodies");
@@ -575,7 +625,7 @@ mod tests {
         let mut document = CamDocument::default();
         document.draw(WireTool::Rectangle).unwrap_or_default();
         document.extrude(10.0).unwrap_or_default();
-        let drawn = scene(&document);
+        let drawn = scene(&document, &[]);
         assert_eq!(drawn.lines.len(), 3 + 4, "the gnomon and the rectangle's four lines");
         assert!(drawn.lines[3..].iter().all(|line| line.color == WIREFRAME && line.on_top));
         assert_eq!(drawn.meshes.len(), 1);
@@ -583,10 +633,10 @@ mod tests {
         assert!(drawn.meshes[0].closed);
 
         document.set_solid_visible(document.solids()[0].id, false);
-        assert!(scene(&document).meshes.is_empty(), "a hidden body is not drawn");
+        assert!(scene(&document, &[]).meshes.is_empty(), "a hidden body is not drawn");
         document.set_solid_visible(document.solids()[0].id, true);
         document.set_level_visible(1, false);
-        let hidden = scene(&document);
+        let hidden = scene(&document, &[]);
         assert!(hidden.meshes.is_empty(), "a body on a hidden level is not drawn");
         assert_eq!(hidden.lines.len(), 3, "and neither is its wireframe");
     }
@@ -641,7 +691,7 @@ mod tests {
     #[test]
     fn the_scene_draws_the_stock_box_translucently() {
         let document = stocked_document();
-        let scene = scene(&document);
+        let scene = scene(&document, &[]);
         assert_eq!(scene.lines.len(), 3 + 4 + 12, "the gnomon, the plate's wireframe and the box's edges");
         assert_eq!(scene.meshes.len(), 2, "the plate and the stock");
         let stock = &scene.meshes[1];
@@ -667,7 +717,7 @@ mod tests {
         let mut document = stocked_document();
         let id = document.solids()[0].id;
         document.set_stock(Some(StockDef::Solid(id)));
-        let scene = scene(&document);
+        let scene = scene(&document, &[]);
         assert_eq!(scene.meshes.len(), 2, "the part and the stock body");
         assert_eq!(scene.meshes[1].color, STOCK_FILL);
         assert!(scene.meshes[1].glass());
@@ -677,12 +727,69 @@ mod tests {
     #[test]
     fn no_stock_and_an_empty_box_add_nothing() {
         let mut document = CamDocument::default();
-        assert!(scene(&document).meshes.is_empty());
+        assert!(scene(&document, &[]).meshes.is_empty());
         document.set_stock(Some(StockDef::BoundingBox { extents: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] }));
-        let scene = scene(&document);
+        let scene = scene(&document, &[]);
         assert!(scene.meshes.is_empty(), "a box with no size is not drawn");
         assert_eq!(scene.lines.len(), 3);
         assert!(!valid_extents([0.0, 0.0, 0.0, 0.0, 1.0, 1.0]));
         assert!(valid_extents([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]));
+    }
+
+    /// A calculated 2D Contour over the four lines of a 40 × 30 rectangle.
+    fn contour_operation() -> Operation {
+        use solidcraft_cam::operations::contour2d::{ChainCurve, Contour2DParams};
+
+        let chain = vec![
+            ChainCurve { id: 1, points: vec![[0.0, 0.0, 0.0], [40.0, 0.0, 0.0]] },
+            ChainCurve { id: 2, points: vec![[40.0, 0.0, 0.0], [40.0, 30.0, 0.0]] },
+            ChainCurve { id: 3, points: vec![[40.0, 30.0, 0.0], [0.0, 30.0, 0.0]] },
+            ChainCurve { id: 4, points: vec![[0.0, 30.0, 0.0], [0.0, 0.0, 0.0]] },
+        ];
+        let params = Contour2DParams::new(vec![1, 2, 3, 4], 1);
+        let generated = solidcraft_cam::tool::ToolLibrary::with_presets()
+            .assemblies()
+            .first()
+            .and_then(|assembly| Operation::generated(params, &chain, &assembly.tool).ok());
+        generated.unwrap_or_default()
+    }
+
+    #[test]
+    fn the_scene_draws_the_toolpath_in_the_rapid_and_feed_colours() {
+        let document = CamDocument::default();
+        let operation = contour_operation();
+        assert!(operation.is_generated(), "the fixture generates");
+        let drawn = scene(&document, std::slice::from_ref(&operation));
+        let rapid = drawn.lines.iter().filter(|line| line.color == TOOLPATH_RAPID).count();
+        let feed = drawn.lines.iter().filter(|line| line.color == TOOLPATH_FEED).count();
+        assert!(rapid >= 2, "the rapid down and the rapid out, got {rapid}");
+        assert!(feed >= 4, "the four sides are feeds, got {feed}");
+        assert!(drawn.lines.iter().skip(3).all(|line| line.on_top), "the toolpath reads over the model");
+        assert_eq!(drawn.lines.len(), 3 + operation.toolpath.len(), "one line per move, after the gnomon");
+    }
+
+    #[test]
+    fn hiding_an_operation_removes_its_toolpath_from_the_scene() {
+        let document = CamDocument::default();
+        let mut operation = contour_operation();
+        operation.set_visible(false);
+        let drawn = scene(&document, &[operation]);
+        assert_eq!(drawn.lines.len(), 3, "only the gnomon is left");
+        assert!(drawn.lines.iter().all(|line| line.color != TOOLPATH_RAPID && line.color != TOOLPATH_FEED));
+    }
+
+    #[test]
+    fn the_toolpath_key_follows_visibility_and_regeneration() {
+        let mut operation = contour_operation();
+        let empty = toolpaths_key(&[]);
+        let generated = toolpaths_key(std::slice::from_ref(&operation));
+        assert_ne!(empty, generated, "a shown operation redraws the viewport");
+        operation.set_visible(false);
+        let hidden = toolpaths_key(std::slice::from_ref(&operation));
+        assert_ne!(generated, hidden, "hiding it redraws the viewport");
+        operation.set_visible(true);
+        assert_ne!(toolpaths_key(std::slice::from_ref(&operation)), hidden, "showing it again redraws too");
+        let same_state = contour_operation();
+        assert_eq!(toolpaths_key(&[same_state]), generated, "the key is deterministic for the same state");
     }
 }

@@ -13,8 +13,9 @@ use cam_workspace::dialogs_cam::ContourPage;
 use cam_workspace::document::{DEFAULT_EXTRUDE_DEPTH, WireTool};
 use cam_workspace::left_manager::ManagerTab;
 use cam_workspace::ribbon::{Command, RibbonTab};
-use cam_workspace::viewport::WIREFRAME;
+use cam_workspace::viewport::{TOOLPATH_FEED, TOOLPATH_RAPID, WIREFRAME};
 use solidcore_record::Vec3;
+use solidcraft_cam::operations::contour2d::{Contour2DParams, LeadKind};
 use solidcraft_cam::stock::{StockDef, StockExcess};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -40,9 +41,27 @@ fn seed_part(app: &mut CamWorkspaceApp) {
     if let Some((min, max)) = app.document.part_bounds() {
         app.document.set_stock(Some(StockDef::from_bounds(min, max, StockExcess::new(5.0, 5.0, 2.0))));
     }
+    // The toolpath the program cuts: a 2D Contour around the plate, two depth cuts deep, with a
+    // roughing pass and a lead arc, so the viewport has rapids and feeds to show.
+    seed_toolpath(app);
     // Frame the part rather than the whole grid the home view shows.
     app.viewport.camera.target = Vec3::new(70.0, 25.0, 6.0);
     app.viewport.camera.distance = 240.0;
+}
+
+/// Defines and calculates the plate's 2D Contour operation.
+fn seed_toolpath(app: &mut CamWorkspaceApp) {
+    let chain: Vec<usize> = app.document.chain_entities().iter().filter(|entity| entity.level == 1).map(|entity| entity.id).collect();
+    let tool = app.tools.assemblies().first().map_or(0, |assembly| assembly.id);
+    let mut params = Contour2DParams::new(chain, tool);
+    // The default 100 mm clearance would leave the frame; the shot shows the whole program.
+    params.linking.clearance = 30.0;
+    params.depth_cuts.max_rough_step = 4.0;
+    params.multipasses.rough_passes = 1;
+    params.multipasses.rough_spacing = 2.0;
+    params.lead_in_out.entry.kind = LeadKind::Arc;
+    params.lead_in_out.exit.kind = LeadKind::Line;
+    app.accept_contour2d(params);
 }
 
 /// Renders one tab of the workspace and saves it under `target/shots`.
@@ -176,6 +195,25 @@ fn the_shot_shows_the_translucent_stock() {
 }
 
 #[test]
+fn the_shot_shows_the_calculated_toolpath_in_rapid_and_feed_colours() {
+    let image = shot("cam-workspace", ManagerTab::Toolpaths);
+    // The rapids are the blueprint's yellow and the feeds its cyan; the wireframe, the stock and
+    // the bodies are blues, reds and greys, so the two toolpath colours stand on their own.
+    let (mut rapid, mut feed) = (0usize, 0usize);
+    for pixel in viewport_pixels(&image) {
+        let [r, g, b, _] = pixel.0;
+        if r > 180 && g > 180 && b < 160 {
+            rapid += 1;
+        }
+        if r < 160 && g > 170 && b > 170 {
+            feed += 1;
+        }
+    }
+    assert!(rapid > 20, "the rapid moves are drawn in {TOOLPATH_RAPID:?}, got {rapid} pixels");
+    assert!(feed > 100, "the feed moves are drawn in {TOOLPATH_FEED:?}, got {feed} pixels");
+}
+
+#[test]
 fn the_stock_setup_shot_shows_the_modal_dialog() {
     let mut opened = false;
     let image = shot_with("cam-workspace-stock-setup", ManagerTab::Levels, |app| {
@@ -211,6 +249,17 @@ fn the_contour_dialog_shot_shows_the_parameter_pages() {
     // that failed to open the dialog would leave only the plain workspace.
     let colours = image.pixels().map(|p| p.0).collect::<std::collections::BTreeSet<_>>();
     assert!(colours.len() > 32, "the dialog must show drawn UI, got {} colours", colours.len());
+}
+
+#[test]
+fn the_toolpaths_shot_lists_the_generated_operation() {
+    let mut app = CamWorkspaceApp::with_context(&egui::Context::default());
+    seed_part(&mut app);
+    assert_eq!(app.operations().len(), 1, "the shot's part has its contour operation");
+    let operation = &app.operations()[0];
+    assert!(operation.is_generated(), "the operation's toolpath is calculated");
+    assert!(operation.toolpath.rapid_moves() > 0 && operation.toolpath.feed_moves() > 0, "the path has rapids and feeds");
+    assert!(operation.toolpath.bounds().is_some());
 }
 
 #[test]

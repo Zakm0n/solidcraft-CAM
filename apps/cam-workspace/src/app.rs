@@ -7,7 +7,7 @@
 //! the viewport and its solid shows up in the manager at once.
 
 use egui::{Align, Color32, Layout};
-use solidcraft_cam::operations::contour2d::Contour2DParams;
+use solidcraft_cam::operations::{Contour2DError, Contour2DParams, Operation};
 use solidcraft_cam::stock::StockDef;
 use solidcraft_cam::tool::ToolLibrary;
 
@@ -73,8 +73,8 @@ pub struct CamWorkspaceApp {
     stock_setup: Option<StockSetupDialog>,
     /// The 2D Contour dialog, while one is open.
     contour2d: Option<Contour2DDialog>,
-    /// The 2D Contour operations the workspace has defined.
-    operations: Vec<Contour2DParams>,
+    /// The operations the workspace has defined, each with its calculated toolpath.
+    operations: Vec<Operation>,
 }
 
 /// The import dialog: a path field and the button that reads the file into the active level.
@@ -219,17 +219,70 @@ impl CamWorkspaceApp {
         self.contour2d.as_mut()
     }
 
-    /// The 2D Contour operations the workspace has defined.
-    pub fn operations(&self) -> &[Contour2DParams] {
+    /// The operations the workspace has defined.
+    pub fn operations(&self) -> &[Operation] {
         &self.operations
     }
 
-    /// Stores a 2D Contour operation the dialog accepted, closes it and reports the result.
+    /// Stores a 2D Contour operation the dialog accepted, calculates its toolpath, closes the
+    /// dialog and reports the result in the status bar.
+    ///
+    /// A path that cannot be calculated is still stored, with no moves, so the parameters the
+    /// user typed are not thrown away; the status bar names the value that stopped it.
     pub fn accept_contour2d(&mut self, params: Contour2DParams) {
-        let tool = self.tools.get(params.tool_id).map_or_else(|| format!("tool {}", params.tool_id), |assembly| assembly.name.clone());
-        self.status = format!("{tool} · {}", params.summary());
-        self.operations.push(params);
+        let tool = self.tools.get(params.tool_id).cloned();
+        let chain = self.document.chain_curves(&params.chain);
+        let mut operation = Operation::new(params);
+        let result = match &tool {
+            Some(assembly) => operation.generate(&chain, &assembly.tool),
+            None => Err(Contour2DError::NoTool),
+        };
+        let name = tool.as_ref().map_or_else(|| format!("tool {}", operation.params.tool_id), |assembly| assembly.name.clone());
+        self.status = match result {
+            Ok(()) => format!("{name} · {} · {}", operation.summary(), operation.toolpath.summary()),
+            Err(error) => format!("2D Contour stored, not generated: {error}"),
+        };
+        self.operations.push(operation);
         self.contour2d = None;
+    }
+
+    /// Recalculates the toolpath of the operation at `index` from the document's geometry and
+    /// the tool library, and reports what it cut.
+    pub fn regenerate_operation(&mut self, index: usize) -> bool {
+        let Some(operation) = self.operations.get(index) else {
+            self.status = "No such operation to regenerate".to_string();
+            return false;
+        };
+        let chain = self.document.chain_curves(&operation.params.chain);
+        let tool = self.tools.get(operation.params.tool_id).map(|assembly| assembly.tool.clone());
+        let summary = operation.summary();
+        let result = match tool {
+            Some(tool) => self.operations.get_mut(index).map(|operation| operation.generate(&chain, &tool)),
+            None => Some(Err(Contour2DError::NoTool)),
+        };
+        match result {
+            Some(Ok(())) => {
+                let path = self.operations.get(index).map(|operation| operation.toolpath.summary()).unwrap_or_default();
+                self.status = format!("{summary}: regenerated · {path}");
+                true
+            }
+            Some(Err(error)) => {
+                self.status = format!("{summary}: not regenerated · {error}");
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Shows or hides the toolpath of the operation at `index`.
+    pub fn toggle_operation_visibility(&mut self, index: usize) {
+        let Some(operation) = self.operations.get_mut(index) else {
+            return;
+        };
+        let visible = !operation.visible;
+        operation.set_visible(visible);
+        let state = if visible { "shown" } else { "hidden" };
+        self.status = format!("{}: toolpath {state}", operation.summary());
     }
 
     /// Closes the 2D Contour dialog without storing an operation.
@@ -265,6 +318,10 @@ impl CamWorkspaceApp {
     fn run_manager(&mut self, action: ManagerAction) {
         match action {
             ManagerAction::NewContour2D => self.open_contour2d(),
+            ManagerAction::RegenerateOperation(index) => {
+                self.regenerate_operation(index);
+            }
+            ManagerAction::ToggleOperationVisibility(index) => self.toggle_operation_visibility(index),
         }
     }
 
@@ -440,7 +497,7 @@ impl CamWorkspaceApp {
 
         // Last, so that it fills what the panels leave over: the live 3D viewport.
         egui::CentralPanel::default().frame(egui::Frame::new().fill(VIEWPORT_BACKGROUND)).show(ui, |ui| {
-            self.viewport.ui(ui, &self.document);
+            self.viewport.ui(ui, &self.document, &self.operations);
         });
         self.import_dialog(ui);
         self.show_tool_library(ui);
@@ -647,9 +704,51 @@ mod tests {
 
         assert!(!app.contour2d_open());
         assert_eq!(app.operations().len(), 1);
-        assert_eq!(app.operations()[0].chain_len(), 4);
+        assert_eq!(app.operations()[0].params.chain_len(), 4);
+        assert!(app.operations()[0].is_generated(), "accepting calculates the toolpath");
+        assert!(app.operations()[0].toolpath.feed_length() > 0.0, "the path cuts");
         assert!(app.status().contains("2D Contour"), "status: {}", app.status());
         assert!(app.status().starts_with("Ø6 flat endmill"), "status names the tool, got {}", app.status());
+        assert!(app.status().contains("moves"), "status sums the toolpath up, got {}", app.status());
+    }
+
+    #[test]
+    fn the_toolpaths_tab_toggles_and_regenerates_an_operation() {
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        app.document.draw(WireTool::Rectangle).unwrap_or_default();
+        app.manager.tab = ManagerTab::Toolpaths;
+        let chain: Vec<usize> = app.document.chain_entities().iter().map(|entity| entity.id).collect();
+        let tool = app.tools.assemblies().first().map_or(0, |assembly| assembly.id);
+        app.accept_contour2d(Contour2DParams::new(chain, tool));
+        let revision = app.operations()[0].revision;
+
+        app.run_manager(ManagerAction::ToggleOperationVisibility(0));
+        assert!(!app.operations()[0].visible, "the visibility toggle hides the path");
+        assert!(app.operations()[0].revision > revision);
+        assert_eq!(app.status(), "2D Contour · 4 entities · depth -10.0 mm: toolpath hidden");
+        app.run_manager(ManagerAction::ToggleOperationVisibility(0));
+        assert!(app.operations()[0].visible);
+
+        app.run_manager(ManagerAction::RegenerateOperation(0));
+        assert!(app.status().contains("regenerated"), "status: {}", app.status());
+        assert!(app.operations()[0].is_generated());
+        app.run_manager(ManagerAction::RegenerateOperation(9));
+        assert!(app.status().contains("No such operation"), "an absent index is reported, got {}", app.status());
+    }
+
+    #[test]
+    fn an_operation_whose_tool_is_gone_is_stored_without_a_path() {
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        app.document.draw(WireTool::Rectangle).unwrap_or_default();
+        let chain: Vec<usize> = app.document.chain_entities().iter().map(|entity| entity.id).collect();
+        app.accept_contour2d(Contour2DParams::new(chain, 999));
+        assert_eq!(app.operations().len(), 1, "the parameters are kept");
+        assert!(!app.operations()[0].is_generated());
+        assert!(app.status().contains("not generated"), "status: {}", app.status());
+        assert!(!app.regenerate_operation(0), "regenerating cannot find the tool either");
+        assert!(app.status().contains("not regenerated"), "status: {}", app.status());
     }
 
     #[test]

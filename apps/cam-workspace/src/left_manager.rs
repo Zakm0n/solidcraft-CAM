@@ -8,7 +8,7 @@
 //! [`CamDocument`], which the ribbon's tools edit. The manager only owns which tab is open.
 
 use egui::{Color32, RichText, ScrollArea};
-use solidcraft_cam::operations::contour2d::Contour2DParams;
+use solidcraft_cam::operations::Operation;
 use solidcraft_cam::tool::ToolLibrary;
 
 use crate::document::CamDocument;
@@ -33,6 +33,9 @@ const SELECTABLE_WIDTH: f32 = 30.0;
 
 /// Width of the entity count column, in points.
 const ENTITY_WIDTH: f32 = 52.0;
+
+/// Width of a toolpath node's Regenerate button, in points.
+const REGENERATE_WIDTH: f32 = 82.0;
 
 /// The highlight behind an active tab and the row it selects, in the light theme: a subtle blue
 /// that reads as "current" without competing with the model.
@@ -111,6 +114,10 @@ impl ManagerTab {
 pub enum ManagerAction {
     /// Define a new 2D Contour operation: open its parameter dialog.
     NewContour2D,
+    /// Recalculate the toolpath of the operation at this index.
+    RegenerateOperation(usize),
+    /// Show or hide the toolpath of the operation at this index.
+    ToggleOperationVisibility(usize),
 }
 
 /// The unified left manager: its tab strip and the view over the document.
@@ -126,13 +133,7 @@ impl LeftManager {
     /// The toolpaths view lists what `operations` hold and selects tools by `tools`; the other
     /// views read the document. The returned action is what a button asked for, for the
     /// application to run after the panel has been drawn.
-    pub fn ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        document: &mut CamDocument,
-        operations: &[Contour2DParams],
-        tools: &ToolLibrary,
-    ) -> Option<ManagerAction> {
+    pub fn ui(&mut self, ui: &mut egui::Ui, document: &mut CamDocument, operations: &[Operation], tools: &ToolLibrary) -> Option<ManagerAction> {
         let mut action = None;
         ui.horizontal_wrapped(|ui| {
             for tab in ManagerTab::ALL {
@@ -231,8 +232,9 @@ impl LeftManager {
         ui.separator();
     }
 
-    /// The `Toolpaths` view: the operations defined so far and the button that defines another.
-    fn toolpaths_view(ui: &mut egui::Ui, operations: &[Contour2DParams], tools: &ToolLibrary) -> Option<ManagerAction> {
+    /// The `Toolpaths` view: the operations defined so far as tree nodes, each with its
+    /// visibility toggle and the button that regenerates it, and the button that defines another.
+    fn toolpaths_view(ui: &mut egui::Ui, operations: &[Operation], tools: &ToolLibrary) -> Option<ManagerAction> {
         let mut action = None;
         ui.horizontal(|ui| {
             if ui.button("+ 2D Contour").on_hover_text("Define a contour operation along chained wireframe").clicked() {
@@ -247,20 +249,38 @@ impl LeftManager {
             empty_state(ui, "No toolpaths created");
             return action;
         }
-        for (index, params) in operations.iter().enumerate() {
-            let tool = tools.get(params.tool_id).map_or("no tool", |assembly| assembly.name.as_str());
+        for (index, operation) in operations.iter().enumerate() {
+            let tool = tools.get(operation.params.tool_id).map_or("no tool", |assembly| assembly.name.as_str());
             let row = egui::Frame::new().inner_margin(egui::Margin::symmetric(2, 1));
             row.show(ui, |ui| {
-                let entity_width = name_width(ui);
+                let name_width = solid_name_width(ui);
                 ui.horizontal(|ui| {
+                    let mut visible = operation.visible;
+                    if ui.add_sized([VISIBLE_WIDTH, ROW_HEIGHT], egui::Checkbox::without_text(&mut visible)).on_hover_text("Visible").changed() {
+                        action = Some(ManagerAction::ToggleOperationVisibility(index));
+                    }
                     ui.add_sized([NUMBER_WIDTH, ROW_HEIGHT], egui::Label::new(RichText::new(format!("{}", index + 1)).monospace()));
-                    ui.add_sized([entity_width, ROW_HEIGHT], egui::Label::new(format!("2D Contour · {tool}")));
-                    ui.add_sized([ENTITY_WIDTH, ROW_HEIGHT], egui::Label::new(RichText::new(format!("{} ent", params.chain_len())).monospace()));
+                    ui.add_sized([name_width, ROW_HEIGHT], egui::Label::new(format!("2D Contour · {tool}")));
+                });
+                // The operation's own line: how much it cuts, and the button that regenerates it.
+                ui.horizontal(|ui| {
+                    let indent = VISIBLE_WIDTH + NUMBER_WIDTH + 2.0 * ui.spacing().item_spacing.x;
+                    ui.add_space(indent);
+                    let summary = if operation.is_generated() { operation.toolpath.summary() } else { "not generated".to_string() };
+                    // The button keeps its width; the summary truncates rather than running under it.
+                    let button_width = REGENERATE_WIDTH;
+                    let summary_width = (ui.available_width() - button_width - ui.spacing().item_spacing.x).max(40.0);
+                    ui.add_sized([summary_width, ROW_HEIGHT], egui::Label::new(RichText::new(summary).weak()).truncate());
+                    if ui
+                        .add_sized([button_width, ROW_HEIGHT], egui::Button::new("Regenerate").small())
+                        .on_hover_text("Recalculate the toolpath from the operation's parameters and chained geometry")
+                        .clicked()
+                    {
+                        action = Some(ManagerAction::RegenerateOperation(index));
+                    }
                 });
             });
         }
-        ui.separator();
-        ui.label(RichText::new("Parameters are stored; the toolpath is generated in the verification phase.").weak());
         action
     }
 
