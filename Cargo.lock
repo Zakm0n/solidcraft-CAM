@@ -698,26 +698,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cam-workspace"
-version = "0.40.0-rc.2"
-dependencies = [
- "eframe",
- "egui",
- "image",
- "js-sys",
- "solidcore-record",
- "solidcraft-cam",
- "solidcraft-geom",
- "solidcraft-io",
- "solidcraft-kernel",
- "solidcraft-render",
- "solidcraft-sketch",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
 name = "cbc"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4129,13 +4109,6 @@ name = "solidcraft-3dx-client"
 version = "0.40.0-rc.2"
 
 [[package]]
-name = "solidcraft-cam"
-version = "0.40.0-rc.2"
-dependencies = [
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "solidcraft-cli"
 version = "0.40.0-rc.2"
 dependencies = [
@@ -4310,9 +4283,11 @@ dependencies = [
 name = "solidcraft-render"
 version = "0.40.0-rc.2"
 dependencies = [
+ "flate2",
  "image",
  "moxcms",
  "png",
+ "robust",
  "serde",
  "serde_json",
  "sha2 0.10.9",

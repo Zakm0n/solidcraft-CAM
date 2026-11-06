@@ -50,3 +50,8 @@ Work: ROADMAP.md, "Where help is wanted most" in CONTRIBUTING.md, issues labelle
 | A bug report, a crash, a wrong result | `skills/solidcraft-reporting/SKILL.md` |
 | Checking, porting, designs in git | `skills/solidcraft-checking/SKILL.md` |
 | Assemblies, joints, motion | `skills/solidcraft-mechanisms/SKILL.md` |
+
+## Z-CAM Expansion Rules (Mandatory)
+1. **Modify SolidCraft In-Place:** Never create a standalone mock binary (`apps/cam-workspace`). All Z-CAM UI modifications happen directly inside `crates/ui-egui`, `apps/solidcraft`, and `apps/solidcraft-web` so the production `wgpu` 3D viewport, camera, and B-Rep kernel remain 100% active.
+2. **Follow `./skills/*/SKILL.md`:** Before modifying UI, commands, or viewport state, read the relevant skill files (`skills/solidcraft-ground-rules/SKILL.md`, `skills/solidcraft-ui/SKILL.md`, `skills/solidcraft-ui-text/SKILL.md`, `skills/solidcraft-commands/SKILL.md`, `skills/solidcraft-performance/SKILL.md`, and `skills/solidcraft-checking/SKILL.md`).
+3. **Mastercam Domain Reference:** When implementing CAM toolpaths, chaining, linking parameters, or tool libraries, consult `mcam-help-docs/docs/` in the workspace root.
