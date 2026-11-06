@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use egui::{Align2, Color32, FontId, PointerButton, Rect, Sense, Stroke, TextureHandle, Ui, Vec2};
-use solidcore_record::Vec3;
+use solidcore_record::{Plane, Vec3};
 use solidcraft_cam::operations::Operation;
 use solidcraft_cam::simulation::{Simulation, StockGrid};
 use solidcraft_cam::stock::StockDef;
@@ -23,7 +23,8 @@ use solidcraft_cam::toolpath::MoveKind;
 use solidcraft_geom::Mesh;
 use solidcraft_render::{Camera, Rgb, Scene, SceneLine, SceneMesh, StandardView, render};
 
-use crate::document::CamDocument;
+use crate::document::{CamDocument, WireTool, standard_plane};
+use crate::interactive_geom::InteractiveGeometry;
 use crate::ribbon::{ViewCommand, ViewCommand::*};
 
 /// Background gradient of the viewport, top and bottom: the light workspace the shell uses.
@@ -134,6 +135,8 @@ impl ViewInput {
 pub struct Viewport {
     /// The orbit camera the scene is drawn through.
     pub camera: Camera,
+    /// The clicking wireframe tool, and where the pointer is on the construction plane.
+    pub interactive: InteractiveGeometry,
     /// The last picture uploaded to egui, with what it was rendered from.
     picture: Option<Rendered>,
 }
@@ -160,7 +163,7 @@ struct RenderKey {
 
 impl Default for Viewport {
     fn default() -> Self {
-        Self { camera: home_camera(), picture: None }
+        Self { camera: home_camera(), interactive: InteractiveGeometry::default(), picture: None }
     }
 }
 
@@ -542,6 +545,30 @@ impl Viewport {
         }
     }
 
+    /// Starts a clicking wireframe tool on `plane`: the pointer's position on that plane follows
+    /// the cursor, and clicks place the tool's points.
+    pub fn begin_wireframe_tool(&mut self, tool: WireTool, plane: Plane) -> bool {
+        self.interactive.begin(tool, plane)
+    }
+
+    /// Follows the pointer across the active construction plane: the world point a click would
+    /// land on, which is what the wireframe tools anchor and what the coordinate readout shows.
+    /// A pointer that is not over the viewport, or a view where the plane is edge-on, leaves no
+    /// point at all rather than a stale one.
+    fn track_pointer(&mut self, rect: Rect, pointer: Option<egui::Pos2>, document: &CamDocument) {
+        self.interactive.set_plane(standard_plane(document.active_plane()));
+        let Some(position) = pointer else {
+            self.interactive.clear_hover();
+            return;
+        };
+        let x = f64::from(position.x - rect.min.x);
+        let y = f64::from(position.y - rect.min.y);
+        let (origin, direction) = self.camera.ray(x, y, f64::from(rect.width()), f64::from(rect.height()));
+        if self.interactive.track_ray(origin, direction).is_none() {
+            self.interactive.clear_hover();
+        }
+    }
+
     /// World length one screen point covers at the camera's target: the scale bar's unit.
     pub fn world_per_point(&self, viewport_height: f32) -> f64 {
         let height = f64::from(viewport_height).max(1.0);
@@ -583,6 +610,7 @@ impl Viewport {
         if response.double_clicked() {
             self.home();
         }
+        self.track_pointer(rect, response.hover_pos(), document);
         self.refresh(ui, rect, document, operations, simulation);
 
         if let Some(picture) = &self.picture {
@@ -738,6 +766,31 @@ mod tests {
         viewport.apply(ViewInput::default(), 600.0);
         assert_eq!(viewport.camera, camera);
         assert!(ViewInput::default().is_idle());
+    }
+
+    #[test]
+    fn the_pointer_is_tracked_on_the_active_construction_plane() {
+        use solidcraft_geom::Vec3Geom;
+
+        let document = CamDocument::default();
+        let mut viewport = Viewport::default();
+        let rect = Rect::from_min_size(egui::pos2(10.0, 20.0), Vec2::new(600.0, 400.0));
+        viewport.track_pointer(rect, Some(rect.center()), &document);
+        let hover = viewport.interactive.hover().expect("the centre of the view projects onto the TOP plane");
+        assert!(hover.dist(Vec3::ZERO) < 1e-9, "the home view centres the origin, got {hover:?}");
+        viewport.track_pointer(rect, None, &document);
+        assert_eq!(viewport.interactive.hover(), None, "a pointer outside the viewport has no position");
+    }
+
+    #[test]
+    fn a_wireframe_tool_follows_the_pointer() {
+        let document = CamDocument::default();
+        let mut viewport = Viewport::default();
+        assert!(viewport.begin_wireframe_tool(WireTool::Line, Plane::XY));
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(400.0, 400.0));
+        viewport.track_pointer(rect, Some(rect.center()), &document);
+        assert!(viewport.interactive.is_active());
+        assert!(viewport.interactive.tool().current_pos().is_some(), "the line tool follows the cursor");
     }
 
     #[test]
