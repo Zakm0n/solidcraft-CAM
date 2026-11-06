@@ -155,6 +155,8 @@ pub enum Command {
     Solid(SolidTool),
     /// Open the import dialog for a format.
     Import(ImportKind),
+    /// Open the Tool Library dialog.
+    ToolLibrary,
     /// Move the camera to a standard view.
     View(ViewCommand),
 }
@@ -230,8 +232,9 @@ const TRANSFORM_TOOLS: [Tool; 5] = [pending("Translate"), pending("Rotate"), pen
 /// The `Art` tab: free-form shaping, none of it wired yet.
 const ART_TOOLS: [Tool; 4] = [pending("Loft"), pending("Sculpt"), pending("Stitch"), pending("Smooth")];
 
-/// The `Machine` tab: machines and toolpaths, none of it wired yet.
-const MACHINE_TOOLS: [Tool; 4] = [pending("Machine Group"), pending("Toolpaths"), pending("Verify"), pending("Post")];
+/// The `Machine` tab: the machine group and its toolpaths, and the tool library they select from.
+const MACHINE_TOOLS: [Tool; 5] =
+    [pending("Machine Group"), pending("Toolpaths"), live("Tool Library", Command::ToolLibrary), pending("Verify"), pending("Post")];
 
 /// The `View` tab: the standard cameras, all live.
 const VIEW_TOOLS: [Tool; 5] = [
@@ -325,5 +328,11 @@ mod tests {
     fn an_unimplemented_tool_keeps_its_button() {
         assert!(SURFACE_TOOLS.iter().all(|tool| tool.command.is_none()));
         assert!(SURFACE_TOOLS.iter().all(|tool| !tool.label.is_empty()));
+    }
+
+    #[test]
+    fn the_machine_tab_opens_the_tool_library() {
+        assert!(MACHINE_TOOLS.iter().any(|tool| tool.command == Some(Command::ToolLibrary)), "the Tool Library button is live");
+        assert!(MACHINE_TOOLS.iter().all(|tool| !tool.label.is_empty()));
     }
 }

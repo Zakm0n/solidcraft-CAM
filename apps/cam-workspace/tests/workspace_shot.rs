@@ -11,6 +11,7 @@ mod raster;
 use cam_workspace::app::{CamWorkspaceApp, LEFT_PANEL_MIN_WIDTH, LEFT_PANEL_WIDTH, RIBBON_HEIGHT};
 use cam_workspace::document::{DEFAULT_EXTRUDE_DEPTH, WireTool};
 use cam_workspace::left_manager::ManagerTab;
+use cam_workspace::ribbon::{Command, RibbonTab};
 use cam_workspace::viewport::WIREFRAME;
 use solidcore_record::Vec3;
 use std::collections::HashMap;
@@ -39,10 +40,17 @@ fn seed_part(app: &mut CamWorkspaceApp) {
 
 /// Renders one tab of the workspace and saves it under `target/shots`.
 fn shot(name: &str, tab: ManagerTab) -> image::RgbaImage {
+    shot_with(name, tab, |_| {})
+}
+
+/// Renders the workspace with `prepare` applied to the app first, and saves it under
+/// `target/shots`: the way the dialog shots open their dialog before the frames run.
+fn shot_with(name: &str, tab: ManagerTab, prepare: impl FnOnce(&mut CamWorkspaceApp)) -> image::RgbaImage {
     let ctx = egui::Context::default();
     let mut app = CamWorkspaceApp::with_context(&ctx);
     app.manager.tab = tab;
     seed_part(&mut app);
+    prepare(&mut app);
     let mut textures = HashMap::new();
     let mut output = None;
     for _ in 0..WARMUP_FRAMES {
@@ -126,6 +134,22 @@ fn every_manager_tab_renders_its_view() {
         let colours = image.pixels().map(|p| p.0).collect::<std::collections::BTreeSet<_>>();
         assert!(colours.len() > 16, "{name} must show drawn UI, got {} colours", colours.len());
     }
+}
+
+#[test]
+fn the_tool_library_shot_shows_the_modal_dialog() {
+    let mut opened = false;
+    let image = shot_with("cam-workspace-tool-library", ManagerTab::Levels, |app| {
+        app.ribbon.tab = RibbonTab::Machine;
+        app.run(Command::ToolLibrary);
+        opened = app.tool_library_open();
+    });
+    assert!(opened, "the dialog is open while the frames run");
+    assert_eq!((image.width(), image.height()), (SIZE.x as u32, SIZE.y as u32));
+    // The modal dims the viewport and paints the library, the preset picker and the editor over
+    // it; a frame that failed to open it would leave only the plain workspace.
+    let colours = image.pixels().map(|p| p.0).collect::<std::collections::BTreeSet<_>>();
+    assert!(colours.len() > 32, "the dialog must show drawn UI, got {} colours", colours.len());
 }
 
 #[test]

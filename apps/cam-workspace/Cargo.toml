@@ -25,6 +25,8 @@ solidcraft-sketch = { workspace = true }
 solidcraft-kernel = { workspace = true }
 solidcraft-io = { workspace = true }
 solidcore-record = { workspace = true }
+# Z-CAM's machining data model: the tool library the Tool Library dialog edits (crates/cam).
+solidcraft-cam = { workspace = true }
 
 [dev-dependencies]
 # The screenshot harness writes the PNG the milestone evidence records.

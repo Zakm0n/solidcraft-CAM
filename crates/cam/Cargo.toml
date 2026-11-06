@@ -1,0 +1,12 @@
+[package]
+name = "solidcraft-cam"
+description = "Z-CAM's machining data model: cutting tools, holders, tool assemblies and the tool library the operations select from"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }

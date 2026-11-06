@@ -7,7 +7,9 @@
 //! the viewport and its solid shows up in the manager at once.
 
 use egui::{Align, Color32, Layout};
+use solidcraft_cam::tool::ToolLibrary;
 
+use crate::dialogs_cam::{ToolLibraryDialog, ToolLibraryOutcome};
 use crate::document::{CamDocument, ImportSummary, SolidTool, WireTool};
 use crate::left_manager::LeftManager;
 use crate::ribbon::{Command, ImportKind, Ribbon, ViewCommand};
@@ -57,10 +59,14 @@ pub struct CamWorkspaceApp {
     pub document: CamDocument,
     /// The 3D viewport: the camera, the scene it draws and its overlays.
     pub viewport: Viewport,
+    /// The tool library the operations select from, starting with the preset catalogue.
+    pub tools: ToolLibrary,
     /// The last command's result, shown in the status bar.
     status: String,
     /// The import dialog, while one is open.
     import: Option<ImportDialog>,
+    /// The Tool Library dialog, while one is open.
+    tool_library: Option<ToolLibraryDialog>,
 }
 
 /// The import dialog: a path field and the button that reads the file into the active level.
@@ -113,7 +119,7 @@ impl CamWorkspaceApp {
     /// Creates the app against any egui context: the window's, or a headless one in a test.
     pub fn with_context(ctx: &egui::Context) -> Self {
         install_style(ctx);
-        Self { status: READY_STATUS.to_string(), ..Self::default() }
+        Self { status: READY_STATUS.to_string(), tools: ToolLibrary::with_presets(), ..Self::default() }
     }
 
     /// The last command's result, as the status bar shows it.
@@ -126,17 +132,55 @@ impl CamWorkspaceApp {
         self.import.is_some()
     }
 
+    /// Whether the Tool Library dialog is open.
+    pub fn tool_library_open(&self) -> bool {
+        self.tool_library.is_some()
+    }
+
+    /// The Tool Library dialog, while one is open.
+    pub fn tool_library_dialog(&self) -> Option<&ToolLibraryDialog> {
+        self.tool_library.as_ref()
+    }
+
+    /// The Tool Library dialog, to drive its working copy from a test.
+    pub fn tool_library_dialog_mut(&mut self) -> Option<&mut ToolLibraryDialog> {
+        self.tool_library.as_mut()
+    }
+
+    /// Stores a library the dialog accepted, closes it and reports the new size.
+    pub fn accept_tool_library(&mut self, library: ToolLibrary) {
+        let count = library.len();
+        let noun = if count == 1 { "assembly" } else { "assemblies" };
+        self.status = format!("Tool Library: {count} tool {noun}");
+        self.tools = library;
+        self.tool_library = None;
+    }
+
+    /// Closes the Tool Library dialog without changing the library.
+    pub fn cancel_tool_library(&mut self) {
+        self.tool_library = None;
+    }
+
     /// Runs the command a ribbon button asked for, and reports the result in the status bar.
     pub fn run(&mut self, command: Command) {
         match command {
             Command::Draw(tool) => self.run_draw(tool),
             Command::Solid(tool) => self.run_solid(tool),
             Command::Import(kind) => self.import = Some(ImportDialog::new(kind)),
+            Command::ToolLibrary => self.open_tool_library(),
             Command::View(view) => {
                 self.apply_view(view);
                 self.status = format!("{} view", view.label());
             }
         }
+    }
+
+    /// Opens the Tool Library dialog on a copy of the library.
+    fn open_tool_library(&mut self) {
+        let count = self.tools.len();
+        let noun = if count == 1 { "assembly" } else { "assemblies" };
+        self.status = format!("Tool Library: {count} tool {noun}");
+        self.tool_library = Some(ToolLibraryDialog::new(self.tools.clone()));
     }
 
     /// Draws a wireframe shape on the active level and reports what landed.
@@ -173,6 +217,7 @@ impl CamWorkspaceApp {
         let level = self.document.active_level_name().to_string();
         let plane = self.document.active_plane_name();
         let solids = self.document.solids().len();
+        let tools = self.tools.len();
         let status = self.status.clone();
         let frame = egui::Frame::new().fill(STATUS_BAR_BACKGROUND).inner_margin(egui::Margin::symmetric(8, 2));
         egui::Panel::bottom("status_bar").exact_size(STATUS_BAR_HEIGHT).frame(frame).show(ui, |ui| {
@@ -182,6 +227,8 @@ impl CamWorkspaceApp {
                 ui.label(format!("Level: {level}"));
                 ui.separator();
                 ui.label(format!("{solids} solid(s)"));
+                ui.separator();
+                ui.label(format!("{tools} tool(s)"));
                 ui.separator();
                 ui.label(status);
                 // Right: the construction plane new geometry is drawn on.
@@ -242,6 +289,16 @@ impl CamWorkspaceApp {
         }
     }
 
+    /// The Tool Library dialog, while one is open: it is a modal window over the viewport.
+    fn show_tool_library(&mut self, ui: &mut egui::Ui) {
+        let Some(mut dialog) = self.tool_library.take() else { return };
+        match dialog.ui(ui.ctx()) {
+            ToolLibraryOutcome::Open => self.tool_library = Some(dialog),
+            ToolLibraryOutcome::Accept(library) => self.accept_tool_library(library),
+            ToolLibraryOutcome::Cancel => (),
+        }
+    }
+
     /// Draws one frame of the workspace into `ui`: the panels first, the viewport last.
     pub fn draw(&mut self, ui: &mut egui::Ui) {
         // The ribbon runs its button's command after it has drawn, so the panel is not borrowed
@@ -257,6 +314,7 @@ impl CamWorkspaceApp {
             self.viewport.ui(ui, &self.document);
         });
         self.import_dialog(ui);
+        self.show_tool_library(ui);
     }
 }
 
@@ -323,6 +381,46 @@ mod tests {
         let mut app = CamWorkspaceApp::with_context(&ctx);
         app.run(Command::Import(ImportKind::Step));
         assert!(app.import_open());
+    }
+
+    #[test]
+    fn a_new_workspace_starts_with_the_preset_tool_library() {
+        let ctx = egui::Context::default();
+        let app = CamWorkspaceApp::with_context(&ctx);
+        assert!(!app.tools.is_empty(), "the tool library starts on the preset catalogue");
+        assert_eq!(app.tools.validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_tool_library_command_opens_the_dialog_on_a_copy() {
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        let before = app.tools.clone();
+        app.run(Command::ToolLibrary);
+        assert!(app.tool_library_open());
+        assert_eq!(app.tools, before, "opening the dialog changes nothing");
+        assert!(app.status().starts_with("Tool Library:"), "status: {}", app.status());
+        app.cancel_tool_library();
+        assert!(!app.tool_library_open());
+        assert_eq!(app.tools, before, "cancelling keeps the library");
+    }
+
+    #[test]
+    fn accepting_the_dialog_stores_its_tools_and_reports_the_count() {
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        let before = app.tools.len();
+        app.run(Command::ToolLibrary);
+        let added = app.tool_library_dialog_mut().map(crate::dialogs_cam::ToolLibraryDialog::add_tool);
+        assert_eq!(added, Some(before + 1), "a new tool takes the next id");
+        let accepted = app.tool_library_dialog().and_then(|dialog| dialog.accept().ok());
+        assert_eq!(accepted.as_ref().map(ToolLibrary::len), Some(before + 1), "the edited library is valid");
+        if let Some(library) = accepted {
+            app.accept_tool_library(library);
+        }
+        assert_eq!(app.tools.len(), before + 1);
+        assert!(!app.tool_library_open(), "OK closes the dialog");
+        assert_eq!(app.status(), format!("Tool Library: {} tool assemblies", before + 1));
     }
 
     #[test]

@@ -8,6 +8,7 @@
 #![deny(unsafe_code)]
 
 pub mod app;
+pub mod dialogs_cam;
 pub mod document;
 pub mod left_manager;
 pub mod ribbon;
