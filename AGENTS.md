@@ -6,7 +6,7 @@ SolidCraft is a clean-room, pure-Rust parametric 3D CAD app (sketch solver, feat
 Work: ROADMAP.md, "Where help is wanted most" in CONTRIBUTING.md, issues labelled `help wanted`, `good first issue`, `needs-triage`; architecture in `docs/architecture.md`. Local `plan/` notes are optional.
 
 ## Hard rules (what enforces each)
-- Independent: never copy another product's code, icons, text or templates; never drive or take data from commercial CAD. `skills/solidcraft-ground-rules/SKILL.md`.
+- Independent: never copy another product's code, icons, text or templates; never drive or take data from commercial CAD/CAM. `skills/solidcraft-ground-rules/SKILL.md`.
 - No GPL/LGPL/AGPL code, not even reading it (OpenCASCADE, FreeCAD, SolveSpace, CadQuery, LibreCAD, QCAD): `cargo xtask licences --check`.
 - Every asset is original or openly licensed with a row in ATTRIBUTION.md; read `assets/AGENTS.md` before icon work: `cargo xtask assets`, `cargo xtask icons`.
 - Never crash: no unwrap/expect/panic/unsafe in non-test code, errors are `Result`, input is hostile: clippy `-D warnings`, `hostile_params_never_panic`.
@@ -16,7 +16,7 @@ Work: ROADMAP.md, "Where help is wanted most" in CONTRIBUTING.md, issues labelle
 - Layering (geom, sketch/kernel/render, doc, io, engine, ui-egui, apps); only `crates/kernel` uses truck: `cargo xtask layers`.
 - One outer UI container, one camera path (`navigation::handle`), colours from theme tokens: `cargo xtask ui-containers`.
 - Application code is Rust only and builds for wasm: `cargo xtask wasm`, `cargo xtask web-offline-test`.
-- The product name is SolidCraft; the old name lives only in `docs/compatibility.md`.
+- The product name is Z-CAM (built on SolidCraft); the old name lives only in `docs/compatibility.md`.
 - Sorted lists (message catalogs, `mod` lines, languages) stay sorted: `cargo xtask lists`. Never edit generated files (`docs/features.md`, `THIRD-PARTY-LICENSES.txt`) in a PR.
 - A design-format change is ONE new file in `crates/doc/src/format/pending/`: `scripts/test-format-pending.sh`.
 - A command has input and output schemas (will become required; `schema/unconverted.txt` only shrinks): `skills/solidcraft-commands/SKILL.md`.
@@ -54,4 +54,4 @@ Work: ROADMAP.md, "Where help is wanted most" in CONTRIBUTING.md, issues labelle
 ## Z-CAM Expansion Rules (Mandatory)
 1. **Modify SolidCraft In-Place:** Never create a standalone mock binary (`apps/cam-workspace`). All Z-CAM UI modifications happen directly inside `crates/ui-egui`, `apps/solidcraft`, and `apps/solidcraft-web` so the production `wgpu` 3D viewport, camera, and B-Rep kernel remain 100% active.
 2. **Follow `./skills/*/SKILL.md`:** Before modifying UI, commands, or viewport state, read the relevant skill files (`skills/solidcraft-ground-rules/SKILL.md`, `skills/solidcraft-ui/SKILL.md`, `skills/solidcraft-ui-text/SKILL.md`, `skills/solidcraft-commands/SKILL.md`, `skills/solidcraft-performance/SKILL.md`, and `skills/solidcraft-checking/SKILL.md`).
-3. **Mastercam Domain Reference:** When implementing CAM toolpaths, chaining, linking parameters, or tool libraries, consult `mcam-help-docs/docs/` in the workspace root.
+3. **Clean-Room Implementation:** Implement all CAM data structures (`crates/cam`), toolpath algorithms, and UI dialogs strictly from the Product Owner's plain-English functional specifications.

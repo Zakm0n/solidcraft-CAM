@@ -1,34 +1,29 @@
 ---
 name: solidcraft-ground-rules
-description: "Use before adding any dependency, icon, image, font, test reference data or product wording to SolidCraft, or when unsure whether something may be copied, read or named. Covers independence from other CAD products, GPL code, asset attribution and the product name."
+description: "Use before adding any dependency, icon, image, font, test reference data or product wording to Z-CAM (SolidCraft fork). Covers clean-room independence from other CAD/CAM products, GPL code, asset attribution and the Z-CAM product name."
 ---
 
-# Independence, licences, assets and the name
+# Independence, licences, assets and the Z-CAM name
 
-The rules that cannot be broken in a PR. `AGENTS.md` lists them in one line each; the reasons are in CONTRIBUTING.md, "Rules that aren't negotiable".
+The rules that cannot be broken. `AGENTS.md` lists them in one line each; the reasons are in CONTRIBUTING.md.
 
-## Independent
-- Behaviour comes from public documentation, general CAD conventions and user feedback. File formats come from public specifications.
+## Independent (Strict Clean-Room)
+- Behaviour comes from Product Owner specifications, public specifications, and general CAD/CAM machining conventions.
 - Never copy another product's code, icons, artwork, help text, tooltips, templates or materials.
-- Reference tests use analytic values (`tools/oracle-analytic/`) or open-source tools. Expected values never come from a commercial CAD product.
-- Do not drive, script, automate or extract data from commercial CAD products (Fusion, SolidWorks, Onshape, ...) for this project: no test data, measurements, command lists, ids or files produced with them.
-- Command ids are our own: dotted, lower-case `<area>.<thing>[.<variant>]`, never another product's id.
+- Reference tests use analytic values (`tools/oracle-analytic/`) or open-source tools. Expected values never come from a commercial CAD/CAM product.
+- Do not drive, script, automate, read or extract data from commercial CAD/CAM products or their proprietary documentation files.
+- Command ids are our own: dotted, lower-case `<area>.<thing>[.<variant>]` (for example, `cam.contour.2d`, `cam.tool_library`), never another product's id.
 
 ## No GPL, LGPL or AGPL code
 - Do not read, copy or link OpenCASCADE, FreeCAD (including planegcs), SolveSpace, CadQuery/OCP, LibreCAD or QCAD. Do not even read their sources.
-- `tools/freecad-oracle/` runs FreeCAD as a separate program through its public scripting API to compute reference values. Nothing from FreeCAD is linked, vendored or shipped. The sketch solver and the blend operations are our own.
-- Permissive dependencies are fine: say which one you add and why in the PR. `THIRD-PARTY-LICENSES.txt` is regenerated on `main`; never edit it in a PR (`cargo xtask licences --check` only reports).
-- Code adapted from other permissive projects (MIT OR Apache-2.0) is noted in ATTRIBUTION.md. Projects published by [storytold](https://github.com/storytold) can serve as references for implementation conventions.
+- Permissive dependencies (MIT, Apache-2.0, BSD) are fine: note any adapted permissive code in ATTRIBUTION.md.
 
 ## Assets: the most serious rule
-- SolidCraft contains no iconography, images, fonts or artwork from commercial CAD products, ever. Screenshots of commercial CAD software are never committed.
-- Every file asset is original or openly licensed and has a row in ATTRIBUTION.md. `cargo xtask assets` enforces it.
+- Z-CAM contains no iconography, images, fonts or artwork from commercial CAD/CAM products, ever. Screenshots of commercial software are never committed.
+- Every file asset is original or openly licensed and has a row in ATTRIBUTION.md.
 - Command icons are the original SVG masters in `assets/icons/ui/design/svg/`, compiled through `crates/ui-egui/src/icon_svg.rs`.
-- Before any icon, icon assignment or media edit, read `assets/AGENTS.md`, `assets/icons/ui/AGENTS.md` and `assets/icons/ui/STYLE_GUIDE.md`. Use the canonical bases and named finished references there; never invent a parallel icon style. `cargo xtask icons` validates them.
 
-## The name
-- SolidCraft everywhere: crates `solidcraft-*`, binaries `solidcraft` and `solidcraft-cli`, `.sc` designs (`.solidcraft` still opens), the `solidcraft/N` format tag, `SOLIDCRAFT_*` environment variables, settings and recovery folders, the MCP server name, docs, CI and packaging.
-- The old name survives only in the compatibility shims listed in `docs/compatibility.md`. Do not add new uses of it.
-- Public docs, web and Flatpak deployments use project Pages `/solidcraft/`. Do not add permanent old-name Pages aliases.
-- Labels, parameter docs, messages and docs use the terms in the glossary (`docs/book/src/reference/glossary.md`): one term for each idea. A change that adds a new idea adds its term there.
+## The Name (Z-CAM on SolidCraft)
+- **User-Facing Branding is Z-CAM:** Window titles, top-level UI branding, application headers, and user-facing dialogs use the name **Z-CAM**.
+- **Internal Crate & File Compatibility:** Keep existing internal Rust crate names (`solidcraft-*`), binaries (`solidcraft`, `solidcraft-web`), `.sc` designs, the `solidcraft/N` format tag, and `SOLIDCRAFT_*` environment variables intact for build compatibility.
 - Units are millimetres and radians internally; Z is up.
