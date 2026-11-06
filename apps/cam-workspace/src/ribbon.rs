@@ -4,7 +4,8 @@
 //! phase does not implement yet keeps its buttons in place, disabled, so the ribbon reads as the
 //! finished layout rather than as a gap. The `Wireframe`, `Solids`, `File` and `View` tabs carry
 //! live commands: their buttons draw geometry on the active level, model solids from it, import
-//! files and move the camera.
+//! files and move the camera. The `Simulation` tab is live too: it sets up the stock and plays
+//! the program's toolpath back in the viewport.
 
 use egui::{Align, Layout};
 
@@ -151,6 +152,34 @@ impl ImportKind {
     }
 }
 
+/// What a `Simulation` tab button asks the playback to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SimulationCommand {
+    /// Start the clock.
+    Play,
+    /// Stop the clock where it is.
+    Pause,
+    /// Advance the tool to the end of the next move.
+    Step,
+    /// Run the program back to its start and restore the stock.
+    Reset,
+}
+
+impl SimulationCommand {
+    /// Every command, in the order the ribbon lists them.
+    pub const ALL: [Self; 4] = [Self::Play, Self::Pause, Self::Step, Self::Reset];
+
+    /// The command as the ribbon names it.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Play => "Play",
+            Self::Pause => "Pause",
+            Self::Step => "Step",
+            Self::Reset => "Reset",
+        }
+    }
+}
+
 /// What a ribbon button asks the application to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -166,6 +195,8 @@ pub enum Command {
     Contour2D,
     /// Open the Stock Setup dialog.
     StockSetup,
+    /// Drive the simulation's playback.
+    Simulation(SimulationCommand),
     /// Move the camera to a standard view.
     View(ViewCommand),
 }
@@ -251,8 +282,15 @@ const MACHINE_TOOLS: [Tool; 6] = [
     pending("Post"),
 ];
 
-/// The `Simulation` tab: the stock the program cuts and the verification of the result.
-const SIMULATION_TOOLS: [Tool; 4] = [live("Stock Setup", Command::StockSetup), pending("Verify"), pending("Play"), pending("Step")];
+/// The `Simulation` tab: the stock the program cuts and the playback that verifies it.
+const SIMULATION_TOOLS: [Tool; 6] = [
+    live("Stock Setup", Command::StockSetup),
+    live("Play", Command::Simulation(SimulationCommand::Play)),
+    live("Pause", Command::Simulation(SimulationCommand::Pause)),
+    live("Step", Command::Simulation(SimulationCommand::Step)),
+    live("Reset", Command::Simulation(SimulationCommand::Reset)),
+    pending("Verify"),
+];
 
 /// The `View` tab: the standard cameras, all live.
 const VIEW_TOOLS: [Tool; 5] = [
@@ -366,6 +404,20 @@ mod tests {
     fn the_simulation_tab_opens_the_stock_setup() {
         assert!(SIMULATION_TOOLS.iter().any(|tool| tool.command == Some(Command::StockSetup)), "the Stock Setup button is live");
         assert!(SIMULATION_TOOLS.iter().all(|tool| !tool.label.is_empty()));
+    }
+
+    #[test]
+    fn the_simulation_tab_plays_pauses_steps_and_resets() {
+        let commands: Vec<_> = SIMULATION_TOOLS.iter().filter_map(|tool| tool.command).collect();
+        let playback: Vec<_> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Simulation(action) => Some(*action),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(playback, SimulationCommand::ALL, "the playback buttons are all live and in order");
+        assert_eq!(SimulationCommand::ALL.map(SimulationCommand::label), ["Play", "Pause", "Step", "Reset"]);
     }
 
     #[test]

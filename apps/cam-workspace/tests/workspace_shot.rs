@@ -12,8 +12,9 @@ use cam_workspace::app::{CamWorkspaceApp, LEFT_PANEL_MIN_WIDTH, LEFT_PANEL_WIDTH
 use cam_workspace::dialogs_cam::ContourPage;
 use cam_workspace::document::{DEFAULT_EXTRUDE_DEPTH, WireTool};
 use cam_workspace::left_manager::ManagerTab;
-use cam_workspace::ribbon::{Command, RibbonTab};
-use cam_workspace::viewport::{TOOLPATH_FEED, TOOLPATH_RAPID, WIREFRAME};
+use cam_workspace::ribbon::{Command, RibbonTab, SimulationCommand};
+use cam_workspace::simulation_panel::SIMULATION_PANEL_BACKGROUND;
+use cam_workspace::viewport::{TOOL_FILL, TOOLPATH_FEED, TOOLPATH_RAPID, WIREFRAME};
 use solidcore_record::Vec3;
 use solidcraft_cam::operations::contour2d::{Contour2DParams, LeadKind};
 use solidcraft_cam::stock::{StockDef, StockExcess};
@@ -54,8 +55,15 @@ fn seed_toolpath(app: &mut CamWorkspaceApp) {
     let chain: Vec<usize> = app.document.chain_entities().iter().filter(|entity| entity.level == 1).map(|entity| entity.id).collect();
     let tool = app.tools.assemblies().first().map_or(0, |assembly| assembly.id);
     let mut params = Contour2DParams::new(chain, tool);
-    // The default 100 mm clearance would leave the frame; the shot shows the whole program.
-    params.linking.clearance = 30.0;
+    // Cut inside the stock the setup defines: the default depth is below the block, so the
+    // verification would have nothing to take off. The clearance keeps the whole program in frame.
+    if let Some([_, _, _, _, _, top]) = app.document.stock_extents() {
+        params.linking.top_of_stock = top;
+        params.linking.feed_plane = top + 2.0;
+        params.linking.retract = top + 4.0;
+        params.linking.clearance = top + 6.0;
+        params.linking.depth = top - 8.0;
+    }
     params.depth_cuts.max_rough_step = 4.0;
     params.multipasses.rough_passes = 1;
     params.multipasses.rough_spacing = 2.0;
@@ -273,6 +281,47 @@ fn the_solids_shot_lists_the_part_the_tools_built() {
     assert_eq!(app.document.levels().len(), 2);
     assert_eq!(app.document.solids()[0].level, 1);
     assert_eq!(app.document.solids()[1].level, 2, "the boss belongs to the level it was drawn on");
+}
+
+#[test]
+fn the_simulation_shot_shows_the_playback_panel_and_the_cut_stock() {
+    let mut cut = false;
+    let mut advanced = 0.0;
+    let image = shot_with("cam-workspace-simulation", ManagerTab::Toolpaths, |app| {
+        app.ribbon.tab = RibbonTab::Simulation;
+        app.run(Command::Simulation(SimulationCommand::Play));
+        let total = app.simulation().total_length();
+        app.scrub_simulation(total * 0.62);
+        advanced = app.simulation().position();
+        cut = app.simulation().grid().is_some_and(|grid| !grid.is_untouched());
+    });
+    assert!(advanced > 0.0, "the scrub put the tool partway along the program");
+    assert!(cut, "the feed moves have taken material off the stock");
+
+    // The playback panel sits above the status bar, in its own background.
+    let width = image.width();
+    let panel_top = image.height().saturating_sub(24 + 64);
+    let panel_bottom = image.height().saturating_sub(24);
+    let mut panel = 0usize;
+    let mut tool = 0usize;
+    for (index, pixel) in image.pixels().enumerate() {
+        let y = (index as u32) / width.max(1);
+        let [r, g, b, _] = pixel.0;
+        if y >= panel_top
+            && y < panel_bottom
+            && pixel.0 == [SIMULATION_PANEL_BACKGROUND.r(), SIMULATION_PANEL_BACKGROUND.g(), SIMULATION_PANEL_BACKGROUND.b(), 255]
+        {
+            panel += 1;
+        }
+        if (r as i32 - i32::from(TOOL_FILL.0)).abs() < 26
+            && (g as i32 - i32::from(TOOL_FILL.1)).abs() < 26
+            && (b as i32 - i32::from(TOOL_FILL.2)).abs() < 26
+        {
+            tool += 1;
+        }
+    }
+    assert!(panel > 1000, "the playback panel is drawn, got {panel} panel pixels");
+    assert!(tool > 60, "the tool cylinder is drawn at the cut, got {tool} tool pixels");
 }
 
 #[test]

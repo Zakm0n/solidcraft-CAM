@@ -8,13 +8,16 @@
 
 use egui::{Align, Color32, Layout};
 use solidcraft_cam::operations::{Contour2DError, Contour2DParams, Operation};
+use solidcraft_cam::simulation::Simulation;
 use solidcraft_cam::stock::StockDef;
 use solidcraft_cam::tool::ToolLibrary;
+use solidcraft_cam::toolpath::Toolpath;
 
 use crate::dialogs_cam::{Contour2DDialog, Contour2DOutcome, StockOutcome, StockSetupDialog, ToolLibraryDialog, ToolLibraryOutcome};
 use crate::document::{CamDocument, ImportSummary, SolidTool, WireTool};
 use crate::left_manager::{LeftManager, ManagerAction};
-use crate::ribbon::{Command, ImportKind, Ribbon, ViewCommand};
+use crate::ribbon::{Command, ImportKind, Ribbon, RibbonTab, SimulationCommand, ViewCommand};
+use crate::simulation_panel::{self, SimulationAction};
 use crate::viewport::Viewport;
 
 pub use crate::ribbon::{RIBBON_HEIGHT, RIBBON_TAB_HEIGHT};
@@ -75,6 +78,10 @@ pub struct CamWorkspaceApp {
     contour2d: Option<Contour2DDialog>,
     /// The operations the workspace has defined, each with its calculated toolpath.
     operations: Vec<Operation>,
+    /// The simulation of one of those operations: the playback clock and the stock it has cut.
+    pub simulation: Simulation,
+    /// The index in `operations` the simulation runs.
+    simulation_operation: usize,
 }
 
 /// The import dialog: a path field and the button that reads the file into the active level.
@@ -197,6 +204,8 @@ impl CamWorkspaceApp {
             Some(definition) => format!("Stock: {}", definition.summary()),
         };
         self.stock_setup = None;
+        // The simulation's height map is sampled over the stock box, so it follows the change.
+        self.rebuild_simulation();
     }
 
     /// Closes the Stock Setup dialog without changing the stock.
@@ -244,6 +253,9 @@ impl CamWorkspaceApp {
         };
         self.operations.push(operation);
         self.contour2d = None;
+        // The new operation is what the Simulation tab verifies.
+        self.simulation_operation = self.operations.len().saturating_sub(1);
+        self.rebuild_simulation();
     }
 
     /// Recalculates the toolpath of the operation at `index` from the document's geometry and
@@ -260,7 +272,7 @@ impl CamWorkspaceApp {
             Some(tool) => self.operations.get_mut(index).map(|operation| operation.generate(&chain, &tool)),
             None => Some(Err(Contour2DError::NoTool)),
         };
-        match result {
+        let regenerated = match result {
             Some(Ok(())) => {
                 let path = self.operations.get(index).map(|operation| operation.toolpath.summary()).unwrap_or_default();
                 self.status = format!("{summary}: regenerated · {path}");
@@ -271,7 +283,10 @@ impl CamWorkspaceApp {
                 false
             }
             None => false,
-        }
+        };
+        // The simulation plays the moves the operation now holds, from the start.
+        self.rebuild_simulation();
+        regenerated
     }
 
     /// Shows or hides the toolpath of the operation at `index`.
@@ -290,6 +305,140 @@ impl CamWorkspaceApp {
         self.contour2d = None;
     }
 
+    /// The simulation of the selected operation: its playback clock and the stock it has cut.
+    pub fn simulation(&self) -> &Simulation {
+        &self.simulation
+    }
+
+    /// The index in [`Self::operations`] the simulation runs.
+    pub fn simulation_operation(&self) -> usize {
+        self.simulation_operation
+    }
+
+    /// Whether the playback panel is showing: on the `Simulation` tab, or while the clock runs.
+    pub fn simulation_panel_visible(&self) -> bool {
+        self.ribbon.tab == RibbonTab::Simulation || self.simulation.playing()
+    }
+
+    /// Starts the playback clock, replaying a program that had already finished.
+    pub fn play_simulation(&mut self) {
+        if self.operations.is_empty() {
+            self.status = "Simulation: no toolpath to run".to_string();
+            return;
+        }
+        self.simulation.play();
+        self.status = format!("Simulation: playing · {}", self.simulation.summary());
+    }
+
+    /// Stops the playback clock where it is.
+    pub fn pause_simulation(&mut self) {
+        self.simulation.pause();
+        self.status = format!("Simulation: paused · {}", self.simulation.summary());
+    }
+
+    /// Starts the clock if it is stopped, stops it if it is running.
+    pub fn toggle_simulation(&mut self) {
+        if self.simulation.playing() {
+            self.pause_simulation();
+        } else {
+            self.play_simulation();
+        }
+    }
+
+    /// Advances the tool to the end of the next move and stops there.
+    pub fn step_simulation(&mut self) {
+        if self.operations.is_empty() {
+            self.status = "Simulation: no toolpath to run".to_string();
+            return;
+        }
+        self.simulation.step();
+        self.status = format!("Simulation: step · {}", self.simulation.summary());
+    }
+
+    /// Runs the program back to its start and restores the stock to raw material.
+    pub fn reset_simulation(&mut self) {
+        self.simulation.reset();
+        self.status = format!("Simulation: reset · {}", self.simulation.summary());
+    }
+
+    /// Puts the tool `position` millimetres along the path: what the timeline's scrub does.
+    pub fn scrub_simulation(&mut self, position: f64) {
+        self.simulation.set_position(position);
+        self.status = format!("Simulation: {}", self.simulation.summary());
+    }
+
+    /// Moves a playing simulation on by `seconds` of real time at its playback speed.
+    pub fn advance_simulation(&mut self, seconds: f64) {
+        self.simulation.advance(seconds);
+    }
+
+    /// Picks the operation the simulation runs and rebuilds it at the program's start.
+    pub fn select_simulation_operation(&mut self, index: usize) {
+        let Some(operation) = self.operations.get(index) else {
+            self.status = "No such operation to simulate".to_string();
+            return;
+        };
+        self.simulation_operation = index;
+        let summary = operation.summary();
+        self.rebuild_simulation();
+        self.status = format!("Simulation: {summary}");
+    }
+
+    /// Rebuilds the simulation from the selected operation, its tool and the stock box, stopped at
+    /// the start: what a new operation, a regenerated path or a changed stock asks for.
+    pub fn rebuild_simulation(&mut self) {
+        self.simulation = self.build_simulation(self.simulation_operation);
+    }
+
+    /// The simulation of the operation at `index`, cut by the tool the library holds for it out of
+    /// the document's stock.
+    fn build_simulation(&self, index: usize) -> Simulation {
+        let (toolpath, tool) = match self.operations.get(index) {
+            Some(operation) => {
+                let tool = self.tools.get(operation.params.tool_id).map(|assembly| assembly.tool.clone());
+                (operation.toolpath.clone(), tool)
+            }
+            None => (Toolpath::new(), None),
+        };
+        Simulation::new(&toolpath, tool.as_ref(), self.document.stock_extents())
+    }
+
+    /// Runs a `Simulation` tab button's command.
+    fn run_simulation_command(&mut self, command: SimulationCommand) {
+        match command {
+            SimulationCommand::Play => self.play_simulation(),
+            SimulationCommand::Pause => self.pause_simulation(),
+            SimulationCommand::Step => self.step_simulation(),
+            SimulationCommand::Reset => self.reset_simulation(),
+        }
+    }
+
+    /// Runs what the playback panel asked for, after the panel has been drawn.
+    fn run_simulation_action(&mut self, action: SimulationAction) {
+        match action {
+            SimulationAction::PlayPause => self.toggle_simulation(),
+            SimulationAction::Step => self.step_simulation(),
+            SimulationAction::Reset => self.reset_simulation(),
+            SimulationAction::Scrub(position) => self.scrub_simulation(position),
+            SimulationAction::SelectOperation(index) => self.select_simulation_operation(index),
+        }
+    }
+
+    /// Advances a playing simulation by the frame's elapsed time, and asks for the next frame
+    /// while it runs: the tool crosses the part at the rates the simulation times its moves at.
+    fn tick_simulation(&mut self, ctx: &egui::Context) {
+        if !self.simulation.playing() {
+            return;
+        }
+        let dt = f64::from(ctx.input(|input| input.stable_dt).clamp(0.0, 0.1));
+        self.simulation.advance(dt);
+        if self.simulation.playing() {
+            ctx.request_repaint();
+        } else {
+            self.status = format!("Simulation: finished · {}", self.simulation.summary());
+        }
+    }
+
     /// Runs the command a ribbon button asked for, and reports the result in the status bar.
     pub fn run(&mut self, command: Command) {
         match command {
@@ -299,6 +448,7 @@ impl CamWorkspaceApp {
             Command::ToolLibrary => self.open_tool_library(),
             Command::Contour2D => self.open_contour2d(),
             Command::StockSetup => self.open_stock_setup(),
+            Command::Simulation(action) => self.run_simulation_command(action),
             Command::View(view) => {
                 self.apply_view(view);
                 self.status = format!("{} view", view.label());
@@ -416,6 +566,21 @@ impl CamWorkspaceApp {
         }
     }
 
+    /// The playback panel above the status bar, while the `Simulation` tab is open or the clock
+    /// runs: the operation being verified, Play/Step/Reset and the timeline's scrub.
+    fn simulation_panel(&mut self, ui: &mut egui::Ui) {
+        if !self.simulation_panel_visible() {
+            return;
+        }
+        let mut action = None;
+        egui::Panel::bottom("simulation_playback").exact_size(simulation_panel::SIMULATION_PANEL_HEIGHT).show(ui, |ui| {
+            action = simulation_panel::ui(ui, &self.simulation, &self.operations, self.simulation_operation);
+        });
+        if let Some(action) = action {
+            self.run_simulation_action(action);
+        }
+    }
+
     /// The import dialog, while one is open: it is a modal window over the viewport.
     fn import_dialog(&mut self, ui: &mut egui::Ui) {
         let Some(mut dialog) = self.import.take() else { return };
@@ -487,17 +652,21 @@ impl CamWorkspaceApp {
 
     /// Draws one frame of the workspace into `ui`: the panels first, the viewport last.
     pub fn draw(&mut self, ui: &mut egui::Ui) {
+        // A playing simulation moves with the frame clock before anything is drawn, so the panels
+        // and the viewport show the same moment.
+        self.tick_simulation(ui.ctx());
         // The ribbon runs its button's command after it has drawn, so the panel is not borrowed
         // while the document changes.
         if let Some(command) = self.ribbon.ui(ui) {
             self.run(command);
         }
         self.status_bar(ui);
+        self.simulation_panel(ui);
         self.manager_panel(ui);
 
         // Last, so that it fills what the panels leave over: the live 3D viewport.
         egui::CentralPanel::default().frame(egui::Frame::new().fill(VIEWPORT_BACKGROUND)).show(ui, |ui| {
-            self.viewport.ui(ui, &self.document, &self.operations);
+            self.viewport.ui(ui, &self.document, &self.operations, Some(&self.simulation));
         });
         self.import_dialog(ui);
         self.show_tool_library(ui);
@@ -749,6 +918,110 @@ mod tests {
         assert!(app.status().contains("not generated"), "status: {}", app.status());
         assert!(!app.regenerate_operation(0), "regenerating cannot find the tool either");
         assert!(app.status().contains("not regenerated"), "status: {}", app.status());
+    }
+
+    /// A plate with stock around it and a 2D Contour that cuts inside that stock, so the
+    /// simulation has material to remove.
+    fn machinable_app() -> CamWorkspaceApp {
+        use solidcraft_cam::stock::StockExcess;
+
+        let mut app = CamWorkspaceApp::with_context(&egui::Context::default());
+        app.document.draw(WireTool::Rectangle).unwrap_or_default();
+        app.document.extrude(crate::document::DEFAULT_EXTRUDE_DEPTH).unwrap_or_default();
+        let (min, max) = app.document.part_bounds().unwrap_or_default();
+        app.accept_stock(Some(StockDef::from_bounds(min, max, StockExcess::new(5.0, 5.0, 2.0))));
+        let chain = app.document.chain_entities().iter().map(|entity| entity.id).collect();
+        let tool = app.tools.assemblies().first().map_or(1, |assembly| assembly.id);
+        let mut params = Contour2DParams::new(chain, tool);
+        // The default depth is below the part's origin; put the cuts inside the stock instead.
+        let top = max[2] + 2.0;
+        params.linking.top_of_stock = top;
+        params.linking.feed_plane = top + 2.0;
+        params.linking.retract = top + 4.0;
+        params.linking.clearance = top + 6.0;
+        params.linking.depth = max[2] - 4.0;
+        params.depth_cuts.max_rough_step = 4.0;
+        app.accept_contour2d(params);
+        app
+    }
+
+    #[test]
+    fn a_new_operation_becomes_what_the_simulation_runs() {
+        let app = CamWorkspaceApp::with_context(&egui::Context::default());
+        assert!(app.simulation().is_empty(), "a new workspace has nothing to run");
+        let app = machinable_app();
+        assert_eq!(app.simulation_operation(), 0);
+        assert!(!app.simulation().is_empty(), "the operation's moves are what the clock runs");
+        assert!(app.simulation().grid().is_some(), "the stock box is what the height map samples");
+        assert!(app.simulation().tool().is_some(), "the operation's tool reaches the simulation");
+    }
+
+    #[test]
+    fn the_playback_runs_the_toolpath_and_cuts_the_stock() {
+        use solidcraft_cam::simulation::StockGrid;
+
+        let mut app = machinable_app();
+        let total = app.simulation().total_length();
+        assert!(total > 0.0);
+        assert!(app.simulation().grid().is_some_and(StockGrid::is_untouched));
+
+        app.play_simulation();
+        assert!(app.simulation().playing());
+        assert!(app.status().starts_with("Simulation: playing"));
+        app.advance_simulation(0.05);
+        assert!(app.simulation().position() > 0.0, "the clock moves the tool");
+        app.pause_simulation();
+        assert!(!app.simulation().playing());
+
+        app.scrub_simulation(total);
+        assert!((app.simulation().position() - total).abs() < 1e-6);
+        assert!(app.simulation().grid().is_some_and(|grid| !grid.is_untouched()), "the cut lowers the surface");
+
+        app.reset_simulation();
+        assert_eq!(app.simulation().position(), 0.0);
+        assert!(app.simulation().grid().is_some_and(StockGrid::is_untouched), "a reset restores the raw stock");
+        assert!(app.status().starts_with("Simulation: reset"));
+    }
+
+    #[test]
+    fn the_simulation_tab_commands_drive_the_playback() {
+        let mut app = machinable_app();
+        app.run(Command::Simulation(SimulationCommand::Play));
+        assert!(app.simulation().playing());
+        app.run(Command::Simulation(SimulationCommand::Pause));
+        assert!(!app.simulation().playing());
+        app.run(Command::Simulation(SimulationCommand::Step));
+        assert!(app.simulation().position() > 0.0, "a step advances one move");
+        assert!(!app.simulation().playing());
+        app.run(Command::Simulation(SimulationCommand::Reset));
+        assert_eq!(app.simulation().position(), 0.0);
+    }
+
+    #[test]
+    fn the_playback_panel_shows_on_the_simulation_tab() {
+        let mut app = CamWorkspaceApp::with_context(&egui::Context::default());
+        assert!(!app.simulation_panel_visible());
+        app.ribbon.tab = RibbonTab::Simulation;
+        assert!(app.simulation_panel_visible());
+        app.ribbon.tab = RibbonTab::Home;
+        assert!(!app.simulation_panel_visible());
+        app.play_simulation();
+        assert!(!app.simulation_panel_visible(), "there is no toolpath to play, so the panel stays shut");
+    }
+
+    #[test]
+    fn the_panel_can_pick_between_operations_to_simulate() {
+        let mut app = machinable_app();
+        let chain = app.document.chain_entities().iter().map(|entity| entity.id).collect();
+        let tool = app.tools.assemblies().first().map_or(1, |assembly| assembly.id);
+        app.accept_contour2d(Contour2DParams::new(chain, tool));
+        assert_eq!(app.operations().len(), 2);
+        assert_eq!(app.simulation_operation(), 1, "a new operation is the one verified");
+        app.select_simulation_operation(0);
+        assert_eq!(app.simulation_operation(), 0);
+        app.select_simulation_operation(9);
+        assert_eq!(app.simulation_operation(), 0, "an absent operation changes nothing");
+        assert!(app.status().contains("No such operation"));
     }
 
     #[test]

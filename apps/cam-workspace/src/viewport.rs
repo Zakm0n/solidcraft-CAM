@@ -7,15 +7,18 @@
 //! viewport changes and uploaded to egui as one texture; a still view costs nothing.
 //!
 //! The scene is the document: the workspace floor and origin gnomon, the wireframe of every
-//! visible level, and the display mesh of every visible solid. Toolpath moves and stock join the
-//! same scene in the phases that create them.
+//! visible level, and the display mesh of every visible solid. The toolpaths join it in yellow
+//! and cyan, and a simulation joins it again: the stock as the surface its height map has been
+//! cut to and the tool as a cylinder at the point the clock has reached.
 
 use std::sync::Arc;
 
 use egui::{Align2, Color32, FontId, PointerButton, Rect, Sense, Stroke, TextureHandle, Ui, Vec2};
 use solidcore_record::Vec3;
 use solidcraft_cam::operations::Operation;
+use solidcraft_cam::simulation::{Simulation, StockGrid};
 use solidcraft_cam::stock::StockDef;
+use solidcraft_cam::tool::CuttingTool;
 use solidcraft_cam::toolpath::MoveKind;
 use solidcraft_geom::Mesh;
 use solidcraft_render::{Camera, Rgb, Scene, SceneLine, SceneMesh, StandardView, render};
@@ -63,6 +66,17 @@ pub const TOOLPATH_FEED: Rgb = Rgb(0, 255, 255);
 /// Width of a toolpath line, in output pixels: a cutting move is drawn on top of the model, so
 /// it reads over the wireframe and the stock without hiding them.
 pub const TOOLPATH_WIDTH: f64 = 1.8;
+
+/// The tool's fill during a simulation: a steel blue that separates the cutter from the part,
+/// the stock and both toolpath colours.
+pub const TOOL_FILL: Rgb = Rgb(70, 120, 190);
+
+/// How opaque the simulated tool is: solid metal, not glass.
+pub const TOOL_OPACITY: f32 = 1.0;
+
+/// How many facets the simulated tool's cylinder is drawn with: round enough at the zoom the
+/// verification uses, few enough to keep the picture cheap.
+pub const TOOL_FACETS: usize = 24;
 
 /// The origin axes: X, Y and Z, the same colours every SolidCraft view draws them in.
 pub const AXIS_X: Rgb = Rgb(220, 60, 60);
@@ -141,6 +155,7 @@ struct RenderKey {
     height: u32,
     revision: u64,
     toolpaths: u64,
+    simulation: u64,
 }
 
 impl Default for Viewport {
@@ -260,8 +275,9 @@ pub fn stock_box_lines(extents: [f64; 6]) -> Vec<SceneLine> {
 }
 
 /// The scene the viewport draws: the background, the ground grid, the gnomon, the visible
-/// levels' wireframe, the visible operations' toolpaths, the visible solids and the stock.
-pub fn scene(document: &CamDocument, operations: &[Operation]) -> Scene {
+/// levels' wireframe, the visible operations' toolpaths, the visible solids, the stock, and — once
+/// a simulation has started — the stock's machined surface and the tool.
+pub fn scene(document: &CamDocument, operations: &[Operation], simulation: Option<&Simulation>) -> Scene {
     let mut scene = Scene { background: Some((BACKGROUND_TOP, BACKGROUND_BOTTOM)), radius: SCENE_RADIUS, ..Scene::default() };
     scene.grid = grid_lines();
     let mut lines: Vec<SceneLine> = gnomon_lines().into_iter().collect();
@@ -286,7 +302,14 @@ pub fn scene(document: &CamDocument, operations: &[Operation]) -> Scene {
             }
         }
         Some(StockDef::BoundingBox { .. }) => {
-            if let Some(extents) = document.stock_extents().filter(|extents| valid_extents(*extents)) {
+            // Once the simulation has cut, its height map is the stock: the surface shows the
+            // channel the tool has cleared instead of the untouched box.
+            let machined = simulation.and_then(|simulation| simulation.grid().filter(|_| simulation.machined() > 0.0));
+            if let Some(grid) = machined {
+                let mut stock = SceneMesh::solid(Arc::new(stock_grid_mesh(grid)), STOCK_FILL);
+                stock.opacity = STOCK_OPACITY;
+                meshes.push(stock);
+            } else if let Some(extents) = document.stock_extents().filter(|extents| valid_extents(*extents)) {
                 let mut stock = SceneMesh::solid(Arc::new(stock_box_mesh(extents)), STOCK_FILL);
                 stock.opacity = STOCK_OPACITY;
                 meshes.push(stock);
@@ -295,9 +318,119 @@ pub fn scene(document: &CamDocument, operations: &[Operation]) -> Scene {
         }
         None => {}
     }
+    // The cutter itself, at the point the clock has reached: a cylinder whose tip is the move's
+    // end, so the verification shows what is taking the material off.
+    if let Some(simulation) = simulation
+        && simulation.machined() > 0.0
+        && let Some(sample) = simulation.sample()
+        && let Some(tool) = simulation.tool()
+        && let Some(mesh) = tool_cylinder_mesh(sample.position, tool)
+    {
+        let mut cutter = SceneMesh::solid(Arc::new(mesh), TOOL_FILL);
+        cutter.opacity = TOOL_OPACITY;
+        meshes.push(cutter);
+    }
     scene.lines = lines;
     scene.meshes = meshes;
     scene
+}
+
+/// A quad of a display mesh in `mesh`, flat-shaded with its own outward normal and filed under
+/// `face`, so the renderer lights it like a body face.
+fn push_quad(mesh: &mut Mesh, quad: [Vec3; 4], face: u32) {
+    let normal = quad_normal(quad);
+    let base = mesh.positions.len() as u32;
+    mesh.positions.extend(quad);
+    mesh.normals.extend([normal; 4]);
+    mesh.triangles.extend([[base, base + 1, base + 2], [base, base + 2, base + 3]]);
+    mesh.tri_face.extend([face, face]);
+}
+
+/// The outward normal of a quad whose corners run counter-clockwise seen from outside; +Z when
+/// the quad is degenerate (a flat, zero-area face lights as if it faced up).
+fn quad_normal([a, b, c, _]: [Vec3; 4]) -> Vec3 {
+    let (ux, uy, uz) = (b.x - a.x, b.y - a.y, b.z - a.z);
+    let (vx, vy, vz) = (c.x - a.x, c.y - a.y, c.z - a.z);
+    let (nx, ny, nz) = (uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+    let length = (nx * nx + ny * ny + nz * nz).sqrt();
+    if length > 1e-12 { Vec3::new(nx / length, ny / length, nz / length) } else { Vec3::new(0.0, 0.0, 1.0) }
+}
+
+/// The stock's machined surface as a display mesh: its top from the height map, a wall down to
+/// the stock's bottom on each edge, and the bottom, so the see-through stock still reads as a
+/// block with a channel cut into it.
+pub fn stock_grid_mesh(grid: &StockGrid) -> Mesh {
+    let mut mesh = Mesh::default();
+    let (columns, rows) = (grid.columns(), grid.rows());
+    let [x0, y0, z0, x1, y1, _] = grid.extents();
+    // The top: one flat-shaded quad per height-map cell.
+    for row in 0..rows.saturating_sub(1) {
+        for column in 0..columns.saturating_sub(1) {
+            let (ax, bx) = (grid.x_of(column), grid.x_of(column + 1));
+            let (ay, by) = (grid.y_of(row), grid.y_of(row + 1));
+            let quad = [
+                Vec3::new(ax, ay, grid.height(column, row)),
+                Vec3::new(bx, ay, grid.height(column + 1, row)),
+                Vec3::new(bx, by, grid.height(column + 1, row + 1)),
+                Vec3::new(ax, by, grid.height(column, row + 1)),
+            ];
+            push_quad(&mut mesh, quad, 0);
+        }
+    }
+    // The four walls, from the surface's edges down to the stock's bottom.
+    for column in 0..columns.saturating_sub(1) {
+        let (ax, bx) = (grid.x_of(column), grid.x_of(column + 1));
+        let (ha, hb) = (grid.height(column, 0), grid.height(column + 1, 0));
+        push_quad(&mut mesh, [Vec3::new(ax, y0, ha), Vec3::new(bx, y0, hb), Vec3::new(bx, y0, z0), Vec3::new(ax, y0, z0)], 1);
+        let (ha, hb) = (grid.height(column, rows.saturating_sub(1)), grid.height(column + 1, rows.saturating_sub(1)));
+        push_quad(&mut mesh, [Vec3::new(bx, y1, hb), Vec3::new(ax, y1, ha), Vec3::new(ax, y1, z0), Vec3::new(bx, y1, z0)], 1);
+    }
+    for row in 0..rows.saturating_sub(1) {
+        let (ay, by) = (grid.y_of(row), grid.y_of(row + 1));
+        let (ha, hb) = (grid.height(0, row), grid.height(0, row + 1));
+        push_quad(&mut mesh, [Vec3::new(x0, by, hb), Vec3::new(x0, ay, ha), Vec3::new(x0, ay, z0), Vec3::new(x0, by, z0)], 1);
+        let (ha, hb) = (grid.height(columns.saturating_sub(1), row), grid.height(columns.saturating_sub(1), row + 1));
+        push_quad(&mut mesh, [Vec3::new(x1, ay, ha), Vec3::new(x1, by, hb), Vec3::new(x1, by, z0), Vec3::new(x1, ay, z0)], 1);
+    }
+    push_quad(&mut mesh, [Vec3::new(x0, y0, z0), Vec3::new(x0, y1, z0), Vec3::new(x1, y1, z0), Vec3::new(x1, y0, z0)], 2);
+    mesh
+}
+
+/// The simulated tool as a display mesh: a cylinder of the tool's diameter and flute length whose
+/// bottom face is at `tip`, so the cutter sits exactly where the toolpath clock has it.
+pub fn tool_cylinder_mesh(tip: [f64; 3], tool: &CuttingTool) -> Option<Mesh> {
+    let radius = tool.diameter / 2.0;
+    let height = tool.flute_length;
+    if !tip.iter().all(|value| value.is_finite()) || !(radius > 0.0) || !radius.is_finite() || !(height > 0.0) || !height.is_finite() {
+        return None;
+    }
+    let (cx, cy, bottom) = (tip[0], tip[1], tip[2]);
+    let top = bottom + height;
+    let mut mesh = Mesh::default();
+    let step = std::f64::consts::TAU / TOOL_FACETS as f64;
+    for facet in 0..TOOL_FACETS {
+        let (a, b) = (facet as f64 * step, (facet + 1) as f64 * step);
+        let (ax, ay) = (cx + radius * a.cos(), cy + radius * a.sin());
+        let (bx, by) = (cx + radius * b.cos(), cy + radius * b.sin());
+        let normal = |x: f64, y: f64| Vec3::new((x - cx) / radius, (y - cy) / radius, 0.0);
+        let base = mesh.positions.len() as u32;
+        mesh.positions.extend([Vec3::new(ax, ay, bottom), Vec3::new(bx, by, bottom), Vec3::new(bx, by, top), Vec3::new(ax, ay, top)]);
+        mesh.normals.extend([normal(ax, ay), normal(bx, by), normal(bx, by), normal(ax, ay)]);
+        mesh.triangles.extend([[base, base + 1, base + 2], [base, base + 2, base + 3]]);
+        mesh.tri_face.extend([0, 0]);
+        // The caps, as fans from the centre: the bottom faces down, the top up.
+        let centre = mesh.positions.len() as u32;
+        mesh.positions.extend([Vec3::new(cx, cy, bottom), Vec3::new(ax, ay, bottom), Vec3::new(bx, by, bottom)]);
+        mesh.normals.extend([Vec3::new(0.0, 0.0, -1.0); 3]);
+        mesh.triangles.push([centre, centre + 2, centre + 1]);
+        mesh.tri_face.push(1);
+        let centre = mesh.positions.len() as u32;
+        mesh.positions.extend([Vec3::new(cx, cy, top), Vec3::new(ax, ay, top), Vec3::new(bx, by, top)]);
+        mesh.normals.extend([Vec3::new(0.0, 0.0, 1.0); 3]);
+        mesh.triangles.push([centre, centre + 1, centre + 2]);
+        mesh.tri_face.push(2);
+    }
+    Some(mesh)
 }
 
 /// The visible operations' moves as scene lines: every move its own polyline, in the rapid
@@ -332,6 +465,23 @@ pub fn toolpaths_key(operations: &[Operation]) -> u64 {
         let visible = u64::from(operation.visible);
         key.rotate_left(9) ^ operation.revision.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ visible
     })
+}
+
+/// What the simulation contributes to the picture: its position, the path it runs, the tool and
+/// the stock the height map is sampled over. The scene is deterministic, so this decides whether
+/// a playing or scrubbed simulation must draw the picture again.
+pub fn simulation_key(simulation: Option<&Simulation>) -> u64 {
+    let Some(simulation) = simulation else { return 0 };
+    let mut key = simulation.position().to_bits().rotate_left(7) ^ simulation.total_length().to_bits();
+    if let Some(tool) = simulation.tool() {
+        key = key.rotate_left(7) ^ tool.diameter.to_bits() ^ tool.effective_corner_radius().to_bits().rotate_left(3);
+    }
+    if let Some(grid) = simulation.grid() {
+        for extent in grid.extents() {
+            key = key.rotate_left(11) ^ extent.to_bits();
+        }
+    }
+    key
 }
 
 /// The largest 1, 2 or 5 times a power of ten that is no bigger than `raw`: the length a scale
@@ -422,7 +572,7 @@ impl Viewport {
 
     /// Draws the viewport into the space `ui` has left: the picture, the gnomon labels, the
     /// view controls and the scale bar.
-    pub fn ui(&mut self, ui: &mut Ui, document: &CamDocument, operations: &[Operation]) {
+    pub fn ui(&mut self, ui: &mut Ui, document: &CamDocument, operations: &[Operation], simulation: Option<&Simulation>) {
         let rect = ui.available_rect_before_wrap();
         if rect.width() < 1.0 || rect.height() < 1.0 {
             return;
@@ -433,7 +583,7 @@ impl Viewport {
         if response.double_clicked() {
             self.home();
         }
-        self.refresh(ui, rect, document, operations);
+        self.refresh(ui, rect, document, operations, simulation);
 
         if let Some(picture) = &self.picture {
             let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -468,15 +618,22 @@ impl Viewport {
 
     /// Re-renders the picture when the camera or the viewport changed, and uploads it. The
     /// picture is drawn at the screen's pixel density, up to [`MAX_RENDER_SIDE`].
-    fn refresh(&mut self, ui: &Ui, rect: Rect, document: &CamDocument, operations: &[Operation]) {
+    fn refresh(&mut self, ui: &Ui, rect: Rect, document: &CamDocument, operations: &[Operation], simulation: Option<&Simulation>) {
         let ppp = ui.ctx().pixels_per_point().clamp(0.5, 4.0);
         let width = ((rect.width() * ppp).round() as u32).clamp(1, MAX_RENDER_SIDE);
         let height = ((rect.height() * ppp).round() as u32).clamp(1, MAX_RENDER_SIDE);
-        let key = RenderKey { camera: self.camera, width, height, revision: document.revision(), toolpaths: toolpaths_key(operations) };
+        let key = RenderKey {
+            camera: self.camera,
+            width,
+            height,
+            revision: document.revision(),
+            toolpaths: toolpaths_key(operations),
+            simulation: simulation_key(simulation),
+        };
         if self.picture.as_ref().is_some_and(|picture| picture.key == key) {
             return;
         }
-        let canvas = render(&scene(document, operations), &self.camera, width as usize, height as usize);
+        let canvas = render(&scene(document, operations, simulation), &self.camera, width as usize, height as usize);
         let image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &canvas.rgba);
         let texture = ui.ctx().load_texture("cam_viewport", image, egui::TextureOptions::LINEAR);
         self.picture = Some(Rendered { key, texture });
@@ -610,7 +767,7 @@ mod tests {
     #[test]
     fn the_scene_draws_the_grid_and_the_gnomon() {
         let document = CamDocument::default();
-        let scene = scene(&document, &[]);
+        let scene = scene(&document, &[], None);
         assert_eq!(scene.grid.len(), 100);
         assert_eq!(scene.lines.len(), 3);
         assert!(scene.meshes.is_empty(), "an empty document draws no bodies");
@@ -625,7 +782,7 @@ mod tests {
         let mut document = CamDocument::default();
         document.draw(WireTool::Rectangle).unwrap_or_default();
         document.extrude(10.0).unwrap_or_default();
-        let drawn = scene(&document, &[]);
+        let drawn = scene(&document, &[], None);
         assert_eq!(drawn.lines.len(), 3 + 4, "the gnomon and the rectangle's four lines");
         assert!(drawn.lines[3..].iter().all(|line| line.color == WIREFRAME && line.on_top));
         assert_eq!(drawn.meshes.len(), 1);
@@ -633,10 +790,10 @@ mod tests {
         assert!(drawn.meshes[0].closed);
 
         document.set_solid_visible(document.solids()[0].id, false);
-        assert!(scene(&document, &[]).meshes.is_empty(), "a hidden body is not drawn");
+        assert!(scene(&document, &[], None).meshes.is_empty(), "a hidden body is not drawn");
         document.set_solid_visible(document.solids()[0].id, true);
         document.set_level_visible(1, false);
-        let hidden = scene(&document, &[]);
+        let hidden = scene(&document, &[], None);
         assert!(hidden.meshes.is_empty(), "a body on a hidden level is not drawn");
         assert_eq!(hidden.lines.len(), 3, "and neither is its wireframe");
     }
@@ -691,7 +848,7 @@ mod tests {
     #[test]
     fn the_scene_draws_the_stock_box_translucently() {
         let document = stocked_document();
-        let scene = scene(&document, &[]);
+        let scene = scene(&document, &[], None);
         assert_eq!(scene.lines.len(), 3 + 4 + 12, "the gnomon, the plate's wireframe and the box's edges");
         assert_eq!(scene.meshes.len(), 2, "the plate and the stock");
         let stock = &scene.meshes[1];
@@ -717,7 +874,7 @@ mod tests {
         let mut document = stocked_document();
         let id = document.solids()[0].id;
         document.set_stock(Some(StockDef::Solid(id)));
-        let scene = scene(&document, &[]);
+        let scene = scene(&document, &[], None);
         assert_eq!(scene.meshes.len(), 2, "the part and the stock body");
         assert_eq!(scene.meshes[1].color, STOCK_FILL);
         assert!(scene.meshes[1].glass());
@@ -727,9 +884,9 @@ mod tests {
     #[test]
     fn no_stock_and_an_empty_box_add_nothing() {
         let mut document = CamDocument::default();
-        assert!(scene(&document, &[]).meshes.is_empty());
+        assert!(scene(&document, &[], None).meshes.is_empty());
         document.set_stock(Some(StockDef::BoundingBox { extents: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] }));
-        let scene = scene(&document, &[]);
+        let scene = scene(&document, &[], None);
         assert!(scene.meshes.is_empty(), "a box with no size is not drawn");
         assert_eq!(scene.lines.len(), 3);
         assert!(!valid_extents([0.0, 0.0, 0.0, 0.0, 1.0, 1.0]));
@@ -759,7 +916,7 @@ mod tests {
         let document = CamDocument::default();
         let operation = contour_operation();
         assert!(operation.is_generated(), "the fixture generates");
-        let drawn = scene(&document, std::slice::from_ref(&operation));
+        let drawn = scene(&document, std::slice::from_ref(&operation), None);
         let rapid = drawn.lines.iter().filter(|line| line.color == TOOLPATH_RAPID).count();
         let feed = drawn.lines.iter().filter(|line| line.color == TOOLPATH_FEED).count();
         assert!(rapid >= 2, "the rapid down and the rapid out, got {rapid}");
@@ -773,7 +930,7 @@ mod tests {
         let document = CamDocument::default();
         let mut operation = contour_operation();
         operation.set_visible(false);
-        let drawn = scene(&document, &[operation]);
+        let drawn = scene(&document, &[operation], None);
         assert_eq!(drawn.lines.len(), 3, "only the gnomon is left");
         assert!(drawn.lines.iter().all(|line| line.color != TOOLPATH_RAPID && line.color != TOOLPATH_FEED));
     }
@@ -791,5 +948,82 @@ mod tests {
         assert_ne!(toolpaths_key(std::slice::from_ref(&operation)), hidden, "showing it again redraws too");
         let same_state = contour_operation();
         assert_eq!(toolpaths_key(&[same_state]), generated, "the key is deterministic for the same state");
+    }
+
+    /// A simulation of a 40 mm feed at Z 0 through stock whose top is 5 mm, scrubbed halfway.
+    fn scrubbed_simulation() -> Simulation {
+        use solidcraft_cam::simulation::Simulation;
+        use solidcraft_cam::tool::{CuttingTool, ToolType};
+        use solidcraft_cam::toolpath::ToolpathBuilder;
+
+        let tool = CuttingTool::new(ToolType::FlatEndmill, 6.0);
+        let mut builder = ToolpathBuilder::new();
+        builder.place([10.0, 15.0, 10.0]);
+        builder.rapid_to([10.0, 15.0, 0.0]);
+        builder.feed_to([50.0, 15.0, 0.0]);
+        builder.rapid_to([50.0, 15.0, 10.0]);
+        let mut simulation = Simulation::new(&builder.finish(), Some(&tool), Some([0.0, 0.0, -5.0, 60.0, 30.0, 5.0]));
+        simulation.set_position(simulation.total_length() * 0.75);
+        simulation
+    }
+
+    #[test]
+    fn the_scene_draws_the_machined_stock_and_the_tool_while_simulating() {
+        let document = stocked_document();
+        let simulation = scrubbed_simulation();
+        assert!(simulation.machined() > 0.0, "the fixture has cut");
+        let drawn = scene(&document, &[], Some(&simulation));
+        assert_eq!(drawn.meshes.len(), 3, "the plate, the machined stock and the cutter");
+        let stock = &drawn.meshes[1];
+        assert_eq!(stock.color, STOCK_FILL);
+        assert!(stock.glass(), "the machined stock is still drawn see-through");
+        assert!(stock.mesh.positions.len() > 24, "the stock is a height map, not the untouched box");
+        let cutter = &drawn.meshes[2];
+        assert_eq!(cutter.color, TOOL_FILL, "the tool joins the scene in its own steel blue");
+        assert!(drawn.lines.iter().all(|line| line.color != STOCK_EDGE), "a machined stock has no box edges");
+    }
+
+    #[test]
+    fn the_stock_grid_mesh_surfaces_the_cut_and_walls_down_to_the_bottom() {
+        use solidcraft_cam::simulation::StockGrid;
+        use solidcraft_cam::tool::{CuttingTool, ToolType};
+
+        let extents = [0.0, 0.0, -5.0, 60.0, 30.0, 5.0];
+        let mut grid = StockGrid::from_extents(extents).expect("the box is usable");
+        grid.cut_at([30.0, 15.0, 0.0], &CuttingTool::new(ToolType::FlatEndmill, 6.0));
+        let mesh = stock_grid_mesh(&grid);
+        assert_eq!(mesh.positions.len(), mesh.normals.len());
+        assert!(!mesh.triangles.is_empty());
+        assert_eq!(mesh.triangles.len(), mesh.tri_face.len());
+        let lowest = mesh.positions.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
+        assert!((lowest + 5.0).abs() < 1e-9, "the walls reach the stock's bottom, got {lowest}");
+        let cut = mesh.positions.iter().filter(|p| p.z < 5.0).count();
+        assert!(cut > 24, "the top carries the cut, not just the walls, got {cut} lowered vertices");
+        assert!(mesh.normals.iter().all(|normal| (normal.x * normal.x + normal.y * normal.y + normal.z * normal.z - 1.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn the_tool_cylinder_stands_on_the_tip_with_the_flute_length() {
+        use solidcraft_cam::tool::{CuttingTool, ToolType};
+
+        let tool = CuttingTool::new(ToolType::FlatEndmill, 10.0);
+        let mesh = tool_cylinder_mesh([1.0, 2.0, -3.0], &tool).expect("a usable tool is drawn");
+        let (bottom, top) =
+            mesh.positions.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), point| (low.min(point.z), high.max(point.z)));
+        assert!((bottom + 3.0).abs() < 1e-9, "the cutter's tip is the move's end, got {bottom}");
+        assert!((top - (bottom + tool.flute_length)).abs() < 1e-9, "the cutter is a flute long, got {top}");
+        let widest = mesh.positions.iter().map(|point| ((point.x - 1.0).powi(2) + (point.y - 2.0).powi(2)).sqrt()).fold(0.0, f64::max);
+        assert!((widest - 5.0).abs() < 1e-9, "the cutter is its diameter wide, got {widest}");
+        assert!(tool_cylinder_mesh([0.0; 3], &CuttingTool::new(ToolType::FlatEndmill, 0.0)).is_none(), "a tool with no diameter draws nothing");
+    }
+
+    #[test]
+    fn the_render_key_follows_the_scrubbed_position() {
+        let simulation = scrubbed_simulation();
+        assert_eq!(simulation_key(Some(&simulation)), simulation_key(Some(&simulation)), "the key is deterministic");
+        assert_ne!(simulation_key(None), simulation_key(Some(&simulation)));
+        let mut again = scrubbed_simulation();
+        again.set_position(0.0);
+        assert_ne!(simulation_key(Some(&simulation)), simulation_key(Some(&again)), "a scrub redraws the picture");
     }
 }

@@ -12,4 +12,5 @@ pub mod dialogs_cam;
 pub mod document;
 pub mod left_manager;
 pub mod ribbon;
+pub mod simulation_panel;
 pub mod viewport;
