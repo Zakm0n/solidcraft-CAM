@@ -14,6 +14,7 @@ use cam_workspace::left_manager::ManagerTab;
 use cam_workspace::ribbon::{Command, RibbonTab};
 use cam_workspace::viewport::WIREFRAME;
 use solidcore_record::Vec3;
+use solidcraft_cam::stock::{StockDef, StockExcess};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -24,7 +25,8 @@ const SIZE: egui::Vec2 = egui::vec2(1280.0, 800.0);
 const WARMUP_FRAMES: usize = 3;
 
 /// Frames the workspace with the same part a CAM programmer would show: a plate extruded on
-/// level 1, a boss on level 2, so the manager and the viewport both have something to say.
+/// level 1, a boss on level 2, and the stock around both, so the manager and the viewport both
+/// have something to say.
 fn seed_part(app: &mut CamWorkspaceApp) {
     // Level 1 (`X`): a rectangular plate.
     app.document.draw(WireTool::Rectangle).expect("the rectangle tool draws on a new document");
@@ -33,6 +35,10 @@ fn seed_part(app: &mut CamWorkspaceApp) {
     app.document.add_level();
     app.document.draw(WireTool::Circle).expect("the circle tool draws on the new level");
     app.document.extrude(DEFAULT_EXTRUDE_DEPTH).expect("the circle extrudes into a boss");
+    // The raw material: a box 5 mm larger than the part on every side.
+    if let Some((min, max)) = app.document.part_bounds() {
+        app.document.set_stock(Some(StockDef::from_bounds(min, max, StockExcess::new(5.0, 5.0, 2.0))));
+    }
     // Frame the part rather than the whole grid the home view shows.
     app.viewport.camera.target = Vec3::new(70.0, 25.0, 6.0);
     app.viewport.camera.distance = 240.0;
@@ -148,6 +154,36 @@ fn the_tool_library_shot_shows_the_modal_dialog() {
     assert_eq!((image.width(), image.height()), (SIZE.x as u32, SIZE.y as u32));
     // The modal dims the viewport and paints the library, the preset picker and the editor over
     // it; a frame that failed to open it would leave only the plain workspace.
+    let colours = image.pixels().map(|p| p.0).collect::<std::collections::BTreeSet<_>>();
+    assert!(colours.len() > 32, "the dialog must show drawn UI, got {} colours", colours.len());
+}
+
+#[test]
+fn the_shot_shows_the_translucent_stock() {
+    let image = shot("cam-workspace", ManagerTab::Levels);
+    // The stock is translucent, so it blends its red fill into the scene rather than hiding the
+    // part: look for pixels tinted red but still carrying the background and the bodies.
+    let mut tinted = 0usize;
+    for pixel in viewport_pixels(&image) {
+        let [r, g, b, _] = pixel.0;
+        let (r, g, b) = (i32::from(r), i32::from(g), i32::from(b));
+        if r > 140 && r > g + 12 && b > g && g > 100 {
+            tinted += 1;
+        }
+    }
+    assert!(tinted > 500, "the stock box is drawn in the blueprint's translucent red, got {tinted} tinted pixels");
+}
+
+#[test]
+fn the_stock_setup_shot_shows_the_modal_dialog() {
+    let mut opened = false;
+    let image = shot_with("cam-workspace-stock-setup", ManagerTab::Levels, |app| {
+        app.ribbon.tab = RibbonTab::Simulation;
+        app.run(Command::StockSetup);
+        opened = app.stock_setup_open();
+    });
+    assert!(opened, "the dialog is open while the frames run");
+    assert_eq!((image.width(), image.height()), (SIZE.x as u32, SIZE.y as u32));
     let colours = image.pixels().map(|p| p.0).collect::<std::collections::BTreeSet<_>>();
     assert!(colours.len() > 32, "the dialog must show drawn UI, got {} colours", colours.len());
 }

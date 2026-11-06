@@ -10,8 +10,12 @@
 //! visible level, and the display mesh of every visible solid. Toolpath moves and stock join the
 //! same scene in the phases that create them.
 
+use std::sync::Arc;
+
 use egui::{Align2, Color32, FontId, PointerButton, Rect, Sense, Stroke, TextureHandle, Ui, Vec2};
 use solidcore_record::Vec3;
+use solidcraft_cam::stock::StockDef;
+use solidcraft_geom::Mesh;
 use solidcraft_render::{Camera, Rgb, Scene, SceneLine, SceneMesh, StandardView, render};
 
 use crate::document::CamDocument;
@@ -30,6 +34,22 @@ pub const WIREFRAME: Rgb = Rgb(30, 70, 140);
 
 /// The solid bodies' fill: a cool steel that separates the part from the background.
 pub const SOLID_FILL: Rgb = Rgb(138, 152, 174);
+
+/// The stock's fill: the blueprint's translucent red, `rgba(200, 50, 50, 60)`.
+pub const STOCK_FILL: Rgb = Rgb(200, 50, 50);
+
+/// The stock box's edges: a darker red that stays readable over the see-through fill.
+pub const STOCK_EDGE: Rgb = Rgb(170, 45, 45);
+
+/// How opaque the stock is drawn: the blueprint's alpha of 60 out of 255, so the part shows
+/// through it.
+pub const STOCK_OPACITY: f32 = 60.0 / 255.0;
+
+/// How opaque the stock box's edges are: nearly solid, so the box still reads as a box.
+pub const STOCK_EDGE_ALPHA: f32 = 0.75;
+
+/// Width of the stock box's edges, in output pixels.
+pub const STOCK_EDGE_WIDTH: f64 = 1.4;
 
 /// The origin axes: X, Y and Z, the same colours every SolidCraft view draws them in.
 pub const AXIS_X: Rgb = Rgb(220, 60, 60);
@@ -169,8 +189,63 @@ pub fn gnomon_lines() -> [SceneLine; 3] {
     [arm(AXIS_X, Vec3::new(1.0, 0.0, 0.0)), arm(AXIS_Y, Vec3::new(0.0, 1.0, 0.0)), arm(AXIS_Z, Vec3::new(0.0, 0.0, 1.0))]
 }
 
+/// Whether `extents` describe a box with a positive, finite size.
+pub fn valid_extents(extents: [f64; 6]) -> bool {
+    extents.iter().all(|value| value.is_finite()) && (0..3).all(|axis| extents[axis + 3] > extents[axis])
+}
+
+/// A box's display mesh: six flat-shaded faces, so the renderer lights it like any other body.
+pub fn stock_box_mesh(extents: [f64; 6]) -> Mesh {
+    let [x0, y0, z0, x1, y1, z1] = extents;
+    let corners = |points: [[f64; 3]; 4]| points.map(|[x, y, z]| Vec3::new(x, y, z));
+    // One quad per face, counter-clockwise seen from outside, with its outward normal.
+    let faces: [([[f64; 3]; 4], [f64; 3]); 6] = [
+        ([[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]], [0.0, 0.0, -1.0]),
+        ([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], [0.0, 0.0, 1.0]),
+        ([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], [0.0, -1.0, 0.0]),
+        ([[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], [0.0, 1.0, 0.0]),
+        ([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], [-1.0, 0.0, 0.0]),
+        ([[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]], [1.0, 0.0, 0.0]),
+    ];
+    let mut mesh = Mesh::default();
+    for (index, (quad, normal)) in faces.into_iter().enumerate() {
+        let base = (index * 4) as u32;
+        mesh.positions.extend(corners(quad));
+        mesh.normals.extend([Vec3::new(normal[0], normal[1], normal[2]); 4]);
+        mesh.triangles.extend([[base, base + 1, base + 2], [base, base + 2, base + 3]]);
+        mesh.tri_face.extend([index as u32, index as u32]);
+    }
+    mesh
+}
+
+/// The twelve edges of a box, in the stock's edge colour.
+pub fn stock_box_lines(extents: [f64; 6]) -> Vec<SceneLine> {
+    let [x0, y0, z0, x1, y1, z1] = extents;
+    let corner = |x: f64, y: f64, z: f64| Vec3::new(x, y, z);
+    let mut bounds = Vec::with_capacity(12);
+    for z in [z0, z1] {
+        bounds.push(([x0, y0, x1, y0], z));
+        bounds.push(([x1, y0, x1, y1], z));
+        bounds.push(([x1, y1, x0, y1], z));
+        bounds.push(([x0, y1, x0, y0], z));
+    }
+    for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
+        bounds.push(([x, y, x, y], 0.0));
+    }
+    let mut lines = Vec::with_capacity(12);
+    for (index, (edge, z)) in bounds.into_iter().enumerate() {
+        let points = if index < 8 {
+            vec![corner(edge[0], edge[1], z), corner(edge[2], edge[3], z)]
+        } else {
+            vec![corner(edge[0], edge[1], z0), corner(edge[2], edge[3], z1)]
+        };
+        lines.push(SceneLine { points, color: STOCK_EDGE, alpha: STOCK_EDGE_ALPHA, width: STOCK_EDGE_WIDTH, on_top: false });
+    }
+    lines
+}
+
 /// The scene the viewport draws: the background, the ground grid, the gnomon, the visible
-/// levels' wireframe and the visible solids.
+/// levels' wireframe, the visible solids and the stock.
 pub fn scene(document: &CamDocument) -> Scene {
     let mut scene = Scene { background: Some((BACKGROUND_TOP, BACKGROUND_BOTTOM)), radius: SCENE_RADIUS, ..Scene::default() };
     scene.grid = grid_lines();
@@ -178,13 +253,34 @@ pub fn scene(document: &CamDocument) -> Scene {
     for wire in document.wireframe_lines() {
         lines.push(SceneLine { points: wire.points, color: WIREFRAME, alpha: 1.0, width: 1.6, on_top: true });
     }
-    scene.lines = lines;
-    scene.meshes = document
+    let mut meshes: Vec<SceneMesh> = document
         .solids()
         .iter()
         .filter(|solid| solid.visible && document.level_visible(solid.level))
         .map(|solid| SceneMesh::solid(solid.mesh.clone(), SOLID_FILL))
         .collect();
+    // The stock is drawn over the part it holds: translucent, so the part still reads through
+    // it, and in the blueprint's red rather than the bodies' steel.
+    match document.stock() {
+        Some(StockDef::Solid(id)) => {
+            if let Some(solid) = document.solid_by_id(id) {
+                let mut stock = SceneMesh::solid(solid.mesh.clone(), STOCK_FILL);
+                stock.opacity = STOCK_OPACITY;
+                meshes.push(stock);
+            }
+        }
+        Some(StockDef::BoundingBox { .. }) => {
+            if let Some(extents) = document.stock_extents().filter(|extents| valid_extents(*extents)) {
+                let mut stock = SceneMesh::solid(Arc::new(stock_box_mesh(extents)), STOCK_FILL);
+                stock.opacity = STOCK_OPACITY;
+                meshes.push(stock);
+                lines.extend(stock_box_lines(extents));
+            }
+        }
+        None => {}
+    }
+    scene.lines = lines;
+    scene.meshes = meshes;
     scene
 }
 
@@ -528,5 +624,65 @@ mod tests {
     fn lengths_are_labelled_in_millimetres() {
         assert_eq!(format_length(50.0), "50 mm");
         assert_eq!(format_length(0.5), "0.5 mm");
+    }
+
+    /// A document with one extruded plate and a box of stock around it.
+    fn stocked_document() -> CamDocument {
+        use solidcraft_cam::stock::StockExcess;
+
+        let mut document = CamDocument::default();
+        document.draw(crate::document::WireTool::Rectangle).unwrap_or_default();
+        document.extrude(10.0).unwrap_or_default();
+        let (min, max) = document.part_bounds().unwrap_or_default();
+        document.set_stock(Some(StockDef::from_bounds(min, max, StockExcess::new(5.0, 5.0, 2.0))));
+        document
+    }
+
+    #[test]
+    fn the_scene_draws_the_stock_box_translucently() {
+        let document = stocked_document();
+        let scene = scene(&document);
+        assert_eq!(scene.lines.len(), 3 + 4 + 12, "the gnomon, the plate's wireframe and the box's edges");
+        assert_eq!(scene.meshes.len(), 2, "the plate and the stock");
+        let stock = &scene.meshes[1];
+        assert_eq!(stock.color, STOCK_FILL);
+        assert!(stock.glass(), "the stock is drawn see-through");
+        assert!((stock.alpha() - f64::from(STOCK_OPACITY)).abs() < 1e-6);
+        assert!(scene.lines[7..].iter().all(|line| line.color == STOCK_EDGE && line.alpha == STOCK_EDGE_ALPHA));
+    }
+
+    #[test]
+    fn the_stock_box_mesh_is_six_quads_around_its_extents() {
+        let mesh = stock_box_mesh([0.0, 0.0, 0.0, 10.0, 20.0, 30.0]);
+        assert_eq!(mesh.positions.len(), 24, "four vertices per face");
+        assert_eq!(mesh.normals.len(), 24);
+        assert_eq!(mesh.triangles.len(), 12);
+        assert_eq!(mesh.positions.iter().map(|p| p.x).fold(f64::INFINITY, f64::min), 0.0);
+        assert_eq!(mesh.positions.iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max), 30.0);
+        assert!(mesh.normals.iter().all(|normal| (normal.x * normal.x + normal.y * normal.y + normal.z * normal.z - 1.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn a_solid_stock_draws_that_body_in_the_stock_colour() {
+        let mut document = stocked_document();
+        let id = document.solids()[0].id;
+        document.set_stock(Some(StockDef::Solid(id)));
+        let scene = scene(&document);
+        assert_eq!(scene.meshes.len(), 2, "the part and the stock body");
+        assert_eq!(scene.meshes[1].color, STOCK_FILL);
+        assert!(scene.meshes[1].glass());
+        assert_eq!(scene.lines.len(), 3 + 4, "a body stock has no box edges of its own");
+    }
+
+    #[test]
+    fn no_stock_and_an_empty_box_add_nothing() {
+        let mut document = CamDocument::default();
+        assert!(scene(&document).meshes.is_empty());
+        document.set_stock(Some(StockDef::BoundingBox { extents: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] }));
+        let scene = scene(&document);
+        assert!(scene.meshes.is_empty(), "a box with no size is not drawn");
+        assert_eq!(scene.lines.len(), 3);
+        assert!(!valid_extents([0.0, 0.0, 0.0, 0.0, 1.0, 1.0]));
+        assert!(valid_extents([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]));
     }
 }

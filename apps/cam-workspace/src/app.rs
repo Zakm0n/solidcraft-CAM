@@ -7,9 +7,10 @@
 //! the viewport and its solid shows up in the manager at once.
 
 use egui::{Align, Color32, Layout};
+use solidcraft_cam::stock::StockDef;
 use solidcraft_cam::tool::ToolLibrary;
 
-use crate::dialogs_cam::{ToolLibraryDialog, ToolLibraryOutcome};
+use crate::dialogs_cam::{StockOutcome, StockSetupDialog, ToolLibraryDialog, ToolLibraryOutcome};
 use crate::document::{CamDocument, ImportSummary, SolidTool, WireTool};
 use crate::left_manager::LeftManager;
 use crate::ribbon::{Command, ImportKind, Ribbon, ViewCommand};
@@ -67,6 +68,8 @@ pub struct CamWorkspaceApp {
     import: Option<ImportDialog>,
     /// The Tool Library dialog, while one is open.
     tool_library: Option<ToolLibraryDialog>,
+    /// The Stock Setup dialog, while one is open.
+    stock_setup: Option<StockSetupDialog>,
 }
 
 /// The import dialog: a path field and the button that reads the file into the active level.
@@ -161,6 +164,41 @@ impl CamWorkspaceApp {
         self.tool_library = None;
     }
 
+    /// Whether the Stock Setup dialog is open.
+    pub fn stock_setup_open(&self) -> bool {
+        self.stock_setup.is_some()
+    }
+
+    /// The Stock Setup dialog, while one is open.
+    pub fn stock_setup_dialog(&self) -> Option<&StockSetupDialog> {
+        self.stock_setup.as_ref()
+    }
+
+    /// The Stock Setup dialog, to drive its settings from a test.
+    pub fn stock_setup_dialog_mut(&mut self) -> Option<&mut StockSetupDialog> {
+        self.stock_setup.as_mut()
+    }
+
+    /// Stores a stock definition the dialog accepted (`None`: no stock), closes it and reports
+    /// what the viewport now draws.
+    pub fn accept_stock(&mut self, stock: Option<StockDef>) {
+        self.document.set_stock(stock);
+        self.status = match stock {
+            None => "Stock: removed".to_string(),
+            Some(StockDef::Solid(id)) => {
+                let name = self.document.solid_by_id(id).map_or_else(|| format!("solid {id}"), |solid| solid.name.clone());
+                format!("Stock: {name}")
+            }
+            Some(definition) => format!("Stock: {}", definition.summary()),
+        };
+        self.stock_setup = None;
+    }
+
+    /// Closes the Stock Setup dialog without changing the stock.
+    pub fn cancel_stock_setup(&mut self) {
+        self.stock_setup = None;
+    }
+
     /// Runs the command a ribbon button asked for, and reports the result in the status bar.
     pub fn run(&mut self, command: Command) {
         match command {
@@ -168,6 +206,7 @@ impl CamWorkspaceApp {
             Command::Solid(tool) => self.run_solid(tool),
             Command::Import(kind) => self.import = Some(ImportDialog::new(kind)),
             Command::ToolLibrary => self.open_tool_library(),
+            Command::StockSetup => self.open_stock_setup(),
             Command::View(view) => {
                 self.apply_view(view);
                 self.status = format!("{} view", view.label());
@@ -181,6 +220,13 @@ impl CamWorkspaceApp {
         let noun = if count == 1 { "assembly" } else { "assemblies" };
         self.status = format!("Tool Library: {count} tool {noun}");
         self.tool_library = Some(ToolLibraryDialog::new(self.tools.clone()));
+    }
+
+    /// Opens the Stock Setup dialog over the document's bodies.
+    fn open_stock_setup(&mut self) {
+        let stock = self.document.stock().map_or_else(|| "no stock".to_string(), StockDef::summary);
+        self.status = format!("Stock Setup: {stock}");
+        self.stock_setup = Some(StockSetupDialog::new(&self.document));
     }
 
     /// Draws a wireframe shape on the active level and reports what landed.
@@ -289,6 +335,16 @@ impl CamWorkspaceApp {
         }
     }
 
+    /// The Stock Setup dialog, while one is open: it is a modal window over the viewport.
+    fn show_stock_setup(&mut self, ui: &mut egui::Ui) {
+        let Some(mut dialog) = self.stock_setup.take() else { return };
+        match dialog.ui(ui.ctx(), &self.document) {
+            StockOutcome::Open => self.stock_setup = Some(dialog),
+            StockOutcome::Apply(stock) => self.accept_stock(stock),
+            StockOutcome::Cancel => (),
+        }
+    }
+
     /// The Tool Library dialog, while one is open: it is a modal window over the viewport.
     fn show_tool_library(&mut self, ui: &mut egui::Ui) {
         let Some(mut dialog) = self.tool_library.take() else { return };
@@ -315,6 +371,7 @@ impl CamWorkspaceApp {
         });
         self.import_dialog(ui);
         self.show_tool_library(ui);
+        self.show_stock_setup(ui);
     }
 }
 
@@ -421,6 +478,53 @@ mod tests {
         assert_eq!(app.tools.len(), before + 1);
         assert!(!app.tool_library_open(), "OK closes the dialog");
         assert_eq!(app.status(), format!("Tool Library: {} tool assemblies", before + 1));
+    }
+
+    #[test]
+    fn the_stock_setup_command_opens_the_dialog() {
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        app.run(Command::StockSetup);
+        assert!(app.stock_setup_open());
+        assert_eq!(app.status(), "Stock Setup: no stock");
+        app.cancel_stock_setup();
+        assert!(!app.stock_setup_open());
+        assert_eq!(app.document.stock(), None, "cancelling keeps the document");
+    }
+
+    #[test]
+    fn accepting_the_stock_dialog_stores_the_material() {
+        use solidcraft_cam::stock::StockExcess;
+
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        app.document.draw(WireTool::Rectangle).unwrap_or_default();
+        app.document.extrude(10.0).unwrap_or_default();
+        app.run(Command::StockSetup);
+        if let Some(dialog) = app.stock_setup_dialog_mut() {
+            dialog.set_excess(StockExcess::new(5.0, 2.0, 1.0));
+        }
+        let stock = app.stock_setup_dialog().and_then(|dialog| dialog.accept(&app.document).ok()).flatten();
+        app.accept_stock(stock);
+        assert!(!app.stock_setup_open());
+        assert!(matches!(app.document.stock(), Some(StockDef::BoundingBox { .. })), "the viewport draws the box");
+        assert_eq!(app.status(), "Stock: 50.0 × 34.0 × 12.0 mm");
+    }
+
+    #[test]
+    fn removing_the_stock_clears_the_document() {
+        use solidcraft_cam::stock::StockExcess;
+
+        let ctx = egui::Context::default();
+        let mut app = CamWorkspaceApp::with_context(&ctx);
+        app.document.draw(WireTool::Rectangle).unwrap_or_default();
+        app.document.extrude(10.0).unwrap_or_default();
+        let (min, max) = app.document.part_bounds().unwrap_or_default();
+        app.accept_stock(Some(StockDef::from_bounds(min, max, StockExcess::default())));
+        assert!(app.document.stock().is_some());
+        app.accept_stock(None);
+        assert_eq!(app.document.stock(), None);
+        assert_eq!(app.status(), "Stock: removed");
     }
 
     #[test]

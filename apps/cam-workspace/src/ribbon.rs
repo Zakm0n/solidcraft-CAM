@@ -45,6 +45,8 @@ pub enum RibbonTab {
     Art,
     /// Machines, groups and toolpaths.
     Machine,
+    /// Stock setup and the verification of the program.
+    Simulation,
     /// Camera and display.
     View,
 }
@@ -63,6 +65,7 @@ impl RibbonTab {
         Self::Transform,
         Self::Art,
         Self::Machine,
+        Self::Simulation,
         Self::View,
     ];
 
@@ -80,6 +83,7 @@ impl RibbonTab {
             Self::Transform => "Transform",
             Self::Art => "Art",
             Self::Machine => "Machine",
+            Self::Simulation => "Simulation",
             Self::View => "View",
         }
     }
@@ -99,6 +103,7 @@ impl RibbonTab {
             Self::Transform => &TRANSFORM_TOOLS,
             Self::Art => &ART_TOOLS,
             Self::Machine => &MACHINE_TOOLS,
+            Self::Simulation => &SIMULATION_TOOLS,
             Self::View => &VIEW_TOOLS,
         }
     }
@@ -157,6 +162,8 @@ pub enum Command {
     Import(ImportKind),
     /// Open the Tool Library dialog.
     ToolLibrary,
+    /// Open the Stock Setup dialog.
+    StockSetup,
     /// Move the camera to a standard view.
     View(ViewCommand),
 }
@@ -236,6 +243,9 @@ const ART_TOOLS: [Tool; 4] = [pending("Loft"), pending("Sculpt"), pending("Stitc
 const MACHINE_TOOLS: [Tool; 5] =
     [pending("Machine Group"), pending("Toolpaths"), live("Tool Library", Command::ToolLibrary), pending("Verify"), pending("Post")];
 
+/// The `Simulation` tab: the stock the program cuts and the verification of the result.
+const SIMULATION_TOOLS: [Tool; 4] = [live("Stock Setup", Command::StockSetup), pending("Verify"), pending("Play"), pending("Step")];
+
 /// The `View` tab: the standard cameras, all live.
 const VIEW_TOOLS: [Tool; 5] = [
     live("Home", Command::View(ViewCommand::Home)),
@@ -291,10 +301,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_ribbon_lists_the_twelve_z_cam_tabs_in_order() {
+    fn the_ribbon_lists_the_thirteen_z_cam_tabs_in_order() {
         assert_eq!(
             RibbonTab::ALL.iter().copied().map(RibbonTab::label).collect::<Vec<_>>(),
-            ["File", "Home", "Wireframe", "Surfaces", "Solids", "Model Prep", "Mesh", "Drafting", "Transform", "Art", "Machine", "View"]
+            [
+                "File",
+                "Home",
+                "Wireframe",
+                "Surfaces",
+                "Solids",
+                "Model Prep",
+                "Mesh",
+                "Drafting",
+                "Transform",
+                "Art",
+                "Machine",
+                "Simulation",
+                "View"
+            ]
         );
         assert_eq!(RibbonTab::default(), RibbonTab::Home);
     }
@@ -328,6 +352,12 @@ mod tests {
     fn an_unimplemented_tool_keeps_its_button() {
         assert!(SURFACE_TOOLS.iter().all(|tool| tool.command.is_none()));
         assert!(SURFACE_TOOLS.iter().all(|tool| !tool.label.is_empty()));
+    }
+
+    #[test]
+    fn the_simulation_tab_opens_the_stock_setup() {
+        assert!(SIMULATION_TOOLS.iter().any(|tool| tool.command == Some(Command::StockSetup)), "the Stock Setup button is live");
+        assert!(SIMULATION_TOOLS.iter().all(|tool| !tool.label.is_empty()));
     }
 
     #[test]

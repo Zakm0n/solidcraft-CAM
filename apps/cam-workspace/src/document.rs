@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use solidcore_record::{Plane, Region2, Vec2, Vec3};
+use solidcraft_cam::stock::StockDef;
 use solidcraft_geom::Mesh;
 use solidcraft_geom::PlaneGeom;
 use solidcraft_kernel::{Body, BoolOp, MeshTolerance};
@@ -249,6 +250,8 @@ pub struct CamDocument {
     sketches: Vec<LevelSketch>,
     /// The solid bodies, in creation order.
     solids: Vec<SolidBody>,
+    /// The raw material the operations cut, once the user has set it up.
+    stock: Option<StockDef>,
     /// Bumped on every change that alters what the viewport draws.
     revision: u64,
     /// The number the next body is named with.
@@ -264,6 +267,7 @@ impl Default for CamDocument {
             active_plane: 0,
             sketches: Vec::new(),
             solids: Vec::new(),
+            stock: None,
             revision: 0,
             next_solid: 1,
         }
@@ -352,6 +356,47 @@ impl CamDocument {
         &self.solids
     }
 
+    /// One solid body by id.
+    pub fn solid_by_id(&self, id: usize) -> Option<&SolidBody> {
+        self.solids.iter().find(|solid| solid.id == id)
+    }
+
+    /// The box around every solid in the document, as `(min, max)` corners: the geometry a
+    /// bounding-box stock is sized from. `None` until the document holds a body.
+    pub fn part_bounds(&self) -> Option<([f64; 3], [f64; 3])> {
+        self.solids.iter().filter_map(|solid| bounds_of(&solid.body)).reduce(|(min, max), (other_min, other_max)| {
+            (
+                [min[0].min(other_min[0]), min[1].min(other_min[1]), min[2].min(other_min[2])],
+                [max[0].max(other_max[0]), max[1].max(other_max[1]), max[2].max(other_max[2])],
+            )
+        })
+    }
+
+    /// The stock the setup defines, if the user has set any up.
+    pub fn stock(&self) -> Option<StockDef> {
+        self.stock
+    }
+
+    /// Stores the stock definition, or removes it with `None`.
+    pub fn set_stock(&mut self, stock: Option<StockDef>) {
+        if self.stock != stock {
+            self.stock = stock;
+            self.revision += 1;
+        }
+    }
+
+    /// The box the stock occupies in the viewport, as `[min x, min y, min z, max x, max y,
+    /// max z]`: a bounding box's own extents, or the selected body's box.
+    pub fn stock_extents(&self) -> Option<[f64; 6]> {
+        let stock = self.stock?;
+        match stock {
+            StockDef::BoundingBox { .. } => stock.extents(),
+            StockDef::Solid(id) => {
+                let (min, max) = bounds_of(&self.solid_by_id(id)?.body)?;
+                Some([min[0], min[1], min[2], max[0], max[1], max[2]])
+            }
+        }
+    }
     /// Shows or hides a solid body.
     pub fn set_solid_visible(&mut self, id: usize, visible: bool) {
         if let Some(solid) = self.solids.iter_mut().find(|solid| solid.id == id) {
@@ -621,6 +666,20 @@ fn display_mesh(body: &Body) -> Result<Arc<Mesh>, CamError> {
     body.mesh(&tolerance).map(Arc::new).map_err(kernel_error)
 }
 
+/// The box around a body's exact vertices and edge hull, as `(min, max)` corners. `None` for a
+/// body with no finite geometry, so callers never size stock from an empty box.
+fn bounds_of(body: &Body) -> Option<([f64; 3], [f64; 3])> {
+    let bounds = body.outline_bounds();
+    if bounds.is_empty() {
+        return None;
+    }
+    let (min, max) = (bounds.min, bounds.max);
+    if ![min.x, min.y, min.z, max.x, max.y, max.z].iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    Some(([min.x, min.y, min.z], [max.x, max.y, max.z]))
+}
+
 /// A kernel failure as a command error.
 fn kernel_error(error: solidcraft_kernel::KernelError) -> CamError {
     CamError::Kernel(error.to_string())
@@ -851,5 +910,56 @@ mod tests {
         assert_eq!(document.active_plane_name(), "FRONT");
         document.draw(WireTool::Rectangle).unwrap_or_default();
         assert!(document.wireframe_lines().iter().all(|line| line.points.iter().all(|point| point.y == 0.0)), "the rectangle lies on FRONT");
+    }
+
+    #[test]
+    fn part_bounds_cover_every_body() {
+        let mut document = CamDocument::default();
+        assert_eq!(document.part_bounds(), None, "an empty document has no part to size stock from");
+        document.draw(WireTool::Rectangle).unwrap_or_default();
+        document.extrude(10.0).unwrap_or_default();
+        let (min, max) = document.part_bounds().unwrap_or_default();
+        assert!((min[0] - 10.0).abs() < 1e-6 && (min[1] - 10.0).abs() < 1e-6, "the rectangle starts at (10, 10), got {min:?}");
+        assert!((max[0] - 50.0).abs() < 1e-6 && (max[1] - 40.0).abs() < 1e-6, "and is 40 by 30, got {max:?}");
+        assert!((max[2] - 10.0).abs() < 1e-6, "the extrusion is 10 mm high");
+    }
+
+    #[test]
+    fn stock_is_stored_and_its_box_follows_the_definition() {
+        let mut document = CamDocument::default();
+        assert_eq!(document.stock(), None);
+        document.draw(WireTool::Rectangle).unwrap_or_default();
+        document.extrude(10.0).unwrap_or_default();
+        let (min, max) = document.part_bounds().unwrap_or_default();
+        let boxed = StockDef::from_bounds(min, max, solidcraft_cam::stock::StockExcess::new(2.0, 2.0, 1.0));
+        let revision = document.revision();
+        document.set_stock(Some(boxed));
+        assert_eq!(document.stock(), Some(boxed));
+        assert!(document.revision() > revision, "setting stock redraws the viewport");
+        let extents = document.stock_extents().unwrap_or_default();
+        assert!((extents[0] - (min[0] - 2.0)).abs() < 1e-4 && (extents[5] - (max[2] + 1.0)).abs() < 1e-4);
+        document.set_stock(None);
+        assert_eq!(document.stock(), None);
+        assert_eq!(document.stock_extents(), None);
+    }
+
+    #[test]
+    fn a_solid_stock_takes_its_box_from_that_body() {
+        let mut document = CamDocument::default();
+        // The second rectangle lands in the next cell of the layout grid, beside the first, and
+        // the one extrusion makes a body of each closed profile.
+        document.draw(WireTool::Rectangle).unwrap_or_default();
+        document.draw(WireTool::Rectangle).unwrap_or_default();
+        assert_eq!(document.extrude(10.0), Ok(2));
+        assert_eq!(document.solids().len(), 2);
+        let first = document.solids()[0].id;
+        document.set_stock(Some(StockDef::Solid(first)));
+        let extents = document.stock_extents().unwrap_or_default();
+        assert!((extents[0] - 10.0).abs() < 1e-4 && (extents[3] - 50.0).abs() < 1e-4, "the first body's box, got {extents:?}");
+        assert!((extents[5] - 10.0).abs() < 1e-4);
+        let (_, part_max) = document.part_bounds().unwrap_or_default();
+        assert!(part_max[0] > 100.0, "the whole part reaches past the first body, got {part_max:?}");
+        document.set_stock(Some(StockDef::Solid(0)));
+        assert_eq!(document.stock_extents(), None, "an unknown body has no box");
     }
 }

@@ -5,11 +5,12 @@
 //! data as plain Rust types, with no UI and no geometry, so the workspace's dialogs, the future
 //! toolpath calculation and any importer all read the same definitions.
 //!
-//! Phase 2A of the Z-CAM blueprint adds the tool library ([`tool`]). The stock definition and the
-//! 2D contour operation follow in their own phases; they extend this crate rather than live in
-//! the application shell.
+//! Phase 2A of the Z-CAM blueprint adds the tool library ([`tool`]); phase 2B adds the stock the
+//! program cuts ([`stock`]). The 2D contour operation follows in its own phase; it extends this
+//! crate rather than lives in the application shell.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![deny(unsafe_code)]
 
+pub mod stock;
 pub mod tool;

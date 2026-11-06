@@ -6,7 +6,10 @@
 //! half-typed diameter never reaches an operation that already names the tool.
 
 use egui::{Align, Color32, Layout, RichText, ScrollArea};
+use solidcraft_cam::stock::{StockDef, StockError, StockExcess};
 use solidcraft_cam::tool::{CuttingTool, PRESETS, ToolAssembly, ToolError, ToolHolder, ToolLibrary, ToolType};
+
+use crate::document::CamDocument;
 
 /// The dialog's width, in points: the assembly list and the editor side by side.
 pub const TOOL_DIALOG_WIDTH: f32 = 720.0;
@@ -331,6 +334,249 @@ fn row<R>(ui: &mut egui::Ui, label: &str, field: impl FnOnce(&mut egui::Ui) -> R
     .inner
 }
 
+/// The Stock Setup dialog's width, in points.
+pub const STOCK_DIALOG_WIDTH: f32 = 460.0;
+
+/// How the Stock Setup dialog defines the material.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StockMode {
+    /// A box around the part geometry, grown by the excess on each side.
+    #[default]
+    BoundingBox,
+    /// An existing solid body used as the raw material.
+    Solid,
+}
+
+/// What the Stock Setup frame's buttons asked for, before the definition is validated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum StockAction {
+    #[default]
+    None,
+    Accept,
+    Remove,
+    Cancel,
+}
+
+/// What the Stock Setup dialog asks the application to do once the frame is drawn.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StockOutcome {
+    /// The dialog stays open and the document is untouched.
+    Open,
+    /// The user accepted a new stock definition (`None`: remove the stock).
+    Apply(Option<StockDef>),
+    /// The user closed the dialog; the document is untouched.
+    Cancel,
+}
+
+/// The Stock Setup dialog's state: the mode, the excess offsets and the body a solid stock names.
+///
+/// The dialog edits nothing until `OK`: it computes the definition from the document when the
+/// user accepts, so a half-typed excess never reaches the viewport.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StockSetupDialog {
+    /// Whether the stock is a box around the part or an existing body.
+    mode: StockMode,
+    /// The material left around the part on each side, in millimetres.
+    excess: StockExcess,
+    /// The id of the body a solid stock names.
+    body: Option<usize>,
+    /// Why the last `OK` was refused, shown under the buttons.
+    error: Option<String>,
+}
+
+impl StockSetupDialog {
+    /// A dialog over `document`, starting on the stock it already has: a solid stock reopens in
+    /// solid mode, everything else starts from a bounding box with no excess.
+    pub fn new(document: &CamDocument) -> Self {
+        let (mode, body) = match document.stock() {
+            Some(StockDef::Solid(id)) => (StockMode::Solid, Some(id)),
+            _ => (StockMode::BoundingBox, document.solids().first().map(|solid| solid.id)),
+        };
+        Self { mode, excess: StockExcess::default(), body, error: None }
+    }
+
+    /// Whether the dialog defines a bounding box or a solid.
+    pub fn mode(&self) -> StockMode {
+        self.mode
+    }
+
+    /// The excess offsets the dialog would apply to a bounding box.
+    pub fn excess(&self) -> StockExcess {
+        self.excess
+    }
+
+    /// Sets the excess offsets: what a test or a caller types into the dialog's fields.
+    pub fn set_excess(&mut self, excess: StockExcess) {
+        self.excess = excess;
+        self.error = None;
+    }
+
+    /// The id of the body a solid stock names.
+    pub fn body(&self) -> Option<usize> {
+        self.body
+    }
+
+    /// Shows `id` as the solid stock, if the document holds that body.
+    pub fn select_body(&mut self, document: &CamDocument, id: usize) {
+        if document.solid_by_id(id).is_some() {
+            self.body = Some(id);
+            self.error = None;
+        }
+    }
+
+    /// Why the last `OK` was refused, if it was.
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// The stock definition the dialog's settings describe, checked against `document`.
+    pub fn preview(&self, document: &CamDocument) -> Result<StockDef, StockError> {
+        match self.mode {
+            StockMode::BoundingBox => {
+                let (min, max) = document.part_bounds().ok_or(StockError::NoGeometry)?;
+                let stock = StockDef::from_bounds(min, max, self.excess);
+                stock.validate()?;
+                Ok(stock)
+            }
+            StockMode::Solid => {
+                let id = self.body.ok_or(StockError::Body)?;
+                if document.solid_by_id(id).is_none() {
+                    return Err(StockError::Body);
+                }
+                let stock = StockDef::Solid(id);
+                stock.validate()?;
+                Ok(stock)
+            }
+        }
+    }
+
+    /// The definition `OK` would store, or why it cannot.
+    pub fn accept(&self, document: &CamDocument) -> Result<Option<StockDef>, StockError> {
+        self.preview(document).map(Some)
+    }
+
+    /// Draws the modal and reports what the user asked for.
+    pub fn ui(&mut self, ctx: &egui::Context, document: &CamDocument) -> StockOutcome {
+        let mut action = StockAction::None;
+        let modal = egui::Modal::new(egui::Id::unique("stock_setup_dialog")).show(ctx, |ui| {
+            ui.set_width(STOCK_DIALOG_WIDTH);
+            self.heading(ui, document);
+            ui.separator();
+            ui.radio_value(&mut self.mode, StockMode::BoundingBox, "Bounding box around part geometry");
+            if self.mode == StockMode::BoundingBox {
+                self.bounding_box_ui(ui, document);
+            }
+            ui.radio_value(&mut self.mode, StockMode::Solid, "Use an existing solid body");
+            if self.mode == StockMode::Solid {
+                self.solid_ui(ui, document);
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                let can_remove = document.stock().is_some();
+                if ui.add_enabled(can_remove, egui::Button::new("Remove stock")).on_hover_text("Cut with no stock defined").clicked() {
+                    action = StockAction::Remove;
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Cancel").clicked() {
+                        action = StockAction::Cancel;
+                    }
+                    if ui.button("OK").clicked() {
+                        action = StockAction::Accept;
+                    }
+                });
+            });
+            if let Some(error) = &self.error {
+                ui.colored_label(ERROR_COLOUR, error);
+            }
+        });
+        match action {
+            StockAction::Accept => match self.accept(document) {
+                Ok(stock) => StockOutcome::Apply(stock),
+                Err(error) => {
+                    self.error = Some(error.to_string());
+                    StockOutcome::Open
+                }
+            },
+            StockAction::Remove => StockOutcome::Apply(None),
+            StockAction::Cancel => StockOutcome::Cancel,
+            StockAction::None => {
+                if modal.should_close() {
+                    StockOutcome::Cancel
+                } else {
+                    StockOutcome::Open
+                }
+            }
+        }
+    }
+
+    /// The title and the stock the document currently has.
+    fn heading(&self, ui: &mut egui::Ui, document: &CamDocument) {
+        ui.horizontal(|ui| {
+            ui.heading("Stock Setup");
+            ui.separator();
+            let current = document.stock().map_or_else(|| "no stock".to_string(), StockDef::summary);
+            ui.label(RichText::new(current).weak());
+        });
+    }
+
+    /// The bounding-box mode: the excess offsets and the box they produce.
+    fn bounding_box_ui(&mut self, ui: &mut egui::Ui, document: &CamDocument) {
+        if document.part_bounds().is_none() {
+            ui.label(RichText::new("No solid geometry to size the stock from. Create or import a body first.").weak());
+            return;
+        }
+        ui.add_space(2.0);
+        row(ui, "Excess X", |ui| {
+            ui.add(egui::DragValue::new(&mut self.excess.x).range(-1000.0..=1000.0).speed(0.5).suffix(" mm").fixed_decimals(2));
+        });
+        row(ui, "Excess Y", |ui| {
+            ui.add(egui::DragValue::new(&mut self.excess.y).range(-1000.0..=1000.0).speed(0.5).suffix(" mm").fixed_decimals(2));
+        });
+        row(ui, "Excess Z", |ui| {
+            ui.add(egui::DragValue::new(&mut self.excess.z).range(-1000.0..=1000.0).speed(0.5).suffix(" mm").fixed_decimals(2));
+        });
+        match self.preview(document) {
+            Ok(stock) => {
+                if let Some([x, y, z]) = stock.size() {
+                    ui.label(RichText::new(format!("Stock size: {x:.2} × {y:.2} × {z:.2} mm")).weak());
+                }
+                if let Some(extents) = stock.extents() {
+                    ui.label(
+                        RichText::new(format!(
+                            "X {:.2} … {:.2}   Y {:.2} … {:.2}   Z {:.2} … {:.2} mm",
+                            extents[0], extents[3], extents[1], extents[4], extents[2], extents[5]
+                        ))
+                        .weak(),
+                    );
+                }
+            }
+            Err(error) => {
+                ui.colored_label(ERROR_COLOUR, error.to_string());
+            }
+        }
+    }
+
+    /// The solid mode: the body picker.
+    fn solid_ui(&mut self, ui: &mut egui::Ui, document: &CamDocument) {
+        if document.solids().is_empty() {
+            ui.label(RichText::new("No solid bodies. Create or import one first.").weak());
+            return;
+        }
+        let chosen = self.body.and_then(|id| document.solid_by_id(id)).map_or("(no body)", |solid| solid.name.as_str());
+        ui.horizontal(|ui| {
+            ui.add_sized([LABEL_WIDTH, ROW_HEIGHT], egui::Label::new("Body"));
+            egui::ComboBox::from_id_salt("stock_solid_body").selected_text(chosen).width(240.0).show_ui(ui, |ui| {
+                for solid in document.solids() {
+                    ui.selectable_value(&mut self.body, Some(solid.id), solid.name.as_str());
+                }
+            });
+        });
+        if self.body.is_none() {
+            ui.label(RichText::new("Select the body the raw material is.").weak());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +633,80 @@ mod tests {
             assembly.tool.diameter = 0.0;
         }
         assert_eq!(dialog.accept(), Err(ToolError::Diameter));
+    }
+
+    /// A document holding one extruded plate, the geometry a stock box is sized from.
+    fn plate_document() -> CamDocument {
+        use crate::document::WireTool;
+
+        let mut document = CamDocument::default();
+        document.draw(WireTool::Rectangle).unwrap_or_default();
+        document.extrude(10.0).unwrap_or_default();
+        document
+    }
+
+    #[test]
+    fn the_stock_dialog_sizes_a_box_from_the_part_and_its_excess() {
+        let document = plate_document();
+        let mut dialog = StockSetupDialog::new(&document);
+        assert_eq!(dialog.mode(), StockMode::BoundingBox);
+        dialog.set_excess(StockExcess::new(5.0, 2.0, 1.0));
+        let stock = dialog.accept(&document).unwrap_or_default();
+        let extents = stock.and_then(StockDef::extents).unwrap_or_default();
+        assert!((extents[0] - 5.0).abs() < 1e-4, "the box starts 5 mm before the part, got {extents:?}");
+        assert!((extents[3] - 55.0).abs() < 1e-4, "and ends 5 mm past it");
+        assert!((extents[4] - 42.0).abs() < 1e-4, "Y gets 2 mm on each side");
+        assert!((extents[5] - 11.0).abs() < 1e-4, "Z gets 1 mm on each side");
+    }
+
+    #[test]
+    fn a_box_that_has_no_material_left_is_refused_with_the_reason() {
+        let document = plate_document();
+        let mut dialog = StockSetupDialog::new(&document);
+        dialog.set_excess(StockExcess::new(0.0, 0.0, -10.0));
+        assert_eq!(dialog.accept(&document), Err(StockError::Extents));
+    }
+
+    #[test]
+    fn a_document_without_bodies_cannot_size_a_box() {
+        let document = CamDocument::default();
+        let dialog = StockSetupDialog::new(&document);
+        assert_eq!(dialog.accept(&document), Err(StockError::NoGeometry));
+    }
+
+    #[test]
+    fn solid_mode_names_an_existing_body() {
+        let mut document = plate_document();
+        let id = document.solids()[0].id;
+        let mut dialog = StockSetupDialog::new(&document);
+        dialog.mode = StockMode::Solid;
+        assert_eq!(dialog.body(), Some(id), "the first body is offered by default");
+        assert_eq!(dialog.accept(&document), Ok(Some(StockDef::Solid(id))));
+        dialog.body = None;
+        assert_eq!(dialog.accept(&document), Err(StockError::Body), "a solid stock needs a body");
+        dialog.select_body(&document, id);
+        dialog.select_body(&document, 999);
+        assert_eq!(dialog.body(), Some(id), "an unknown body is not selected");
+        document.set_stock(Some(StockDef::Solid(id)));
+        assert_eq!(StockSetupDialog::new(&document).mode(), StockMode::Solid, "a solid stock reopens in solid mode");
+    }
+
+    #[test]
+    fn the_stock_dialog_draws_its_modes() {
+        let document = plate_document();
+        let ctx = egui::Context::default();
+        let mut dialog = StockSetupDialog::new(&document);
+        let mut primitives = Vec::new();
+        for _ in 0..2 {
+            let input =
+                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |_ui| {
+                assert_eq!(dialog.ui(&ctx, &document), StockOutcome::Open, "a frame with no click leaves the dialog open");
+            });
+            primitives = ctx.tessellate(out.shapes, out.pixels_per_point);
+            out.textures_delta.clear();
+        }
+        assert!(!primitives.is_empty(), "the dialog must draw something");
     }
 
     #[test]
