@@ -59,6 +59,7 @@ pub mod bom;
 pub mod browser;
 pub mod cam_coordinate_system;
 pub mod cam_tool;
+pub mod cam_toolpath;
 pub mod canvas;
 pub mod clearance;
 pub mod compare;

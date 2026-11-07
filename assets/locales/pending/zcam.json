@@ -12,6 +12,8 @@
     "cmd.cam.tool.create": "Tool",
     "cmd.cam.tool.edit": "Edit Tool",
     "cmd.cam.tool.list": "Tool Library",
+    "cmd.cam.toolpath.contour": "Contour",
+    "cmd.cam.toolpath.pocket": "Pocket",
     "help.cam.coordinate_system.create": "Creates a programmable machining origin and XYZ orientation.\n\nUse this to define where the machine zero is located on the stock.",
     "ui.cam.toolpaths.empty": "No toolpaths yet"
   },
@@ -28,6 +30,8 @@
     "cmd.cam.tool.create": "أداة",
     "cmd.cam.tool.edit": "تحرير الأداة",
     "cmd.cam.tool.list": "مكتبة الأدوات",
+    "cmd.cam.toolpath.contour": "كفاف",
+    "cmd.cam.toolpath.pocket": "جيب",
     "help.cam.coordinate_system.create": "ينشئ أصل تشغيل قابلًا للبرمجة واتجاه XYZ.\n\nاستخدمه لتحديد موضع صفر الآلة على قطعة العمل الخام.",
     "ui.cam.toolpaths.empty": "لا توجد مسارات أدوات بعد"
   },
@@ -44,6 +48,8 @@
     "cmd.cam.tool.create": "Werkzeug",
     "cmd.cam.tool.edit": "Werkzeug bearbeiten",
     "cmd.cam.tool.list": "Werkzeugbibliothek",
+    "cmd.cam.toolpath.contour": "Kontur",
+    "cmd.cam.toolpath.pocket": "Tasche",
     "help.cam.coordinate_system.create": "Erstellt einen programmierbaren Bearbeitungsursprung und eine XYZ-Ausrichtung.\n\nDamit legen Sie fest, wo der Maschinennullpunkt auf dem Rohteil liegt.",
     "ui.cam.toolpaths.empty": "Noch keine Werkzeugwege"
   },
@@ -60,6 +66,8 @@
     "cmd.cam.tool.create": "כלי",
     "cmd.cam.tool.edit": "עריכת כלי",
     "cmd.cam.tool.list": "ספריית כלים",
+    "cmd.cam.toolpath.contour": "קו מתאר",
+    "cmd.cam.toolpath.pocket": "כיס",
     "help.cam.coordinate_system.create": "יוצר מקור עיבוד הניתן לתכנות וכיוון XYZ.\n\nהשתמשו בו כדי להגדיר היכן נמצא אפס המכונה על גבי חומר הגלם.",
     "ui.cam.toolpaths.empty": "אין עדיין נתיבי כלים"
   },
@@ -76,6 +84,8 @@
     "cmd.cam.tool.create": "工具",
     "cmd.cam.tool.edit": "工具を編集",
     "cmd.cam.tool.list": "工具ライブラリ",
+    "cmd.cam.toolpath.contour": "輪郭",
+    "cmd.cam.toolpath.pocket": "ポケット",
     "help.cam.coordinate_system.create": "プログラミング可能な加工原点と XYZ 方向を作成します。\n\n工作物上での機械原点の位置を定義するために使用します。",
     "ui.cam.toolpaths.empty": "ツールパスはまだありません"
   },
@@ -92,6 +102,8 @@
     "cmd.cam.tool.create": "공구",
     "cmd.cam.tool.edit": "공구 편집",
     "cmd.cam.tool.list": "공구 라이브러리",
+    "cmd.cam.toolpath.contour": "윤곽",
+    "cmd.cam.toolpath.pocket": "포켓",
     "help.cam.coordinate_system.create": "프로그래밍 가능한 가공 원점과 XYZ 방향을 만듭니다.\n\n원자재에서 기계 원점의 위치를 정의할 때 사용합니다.",
     "ui.cam.toolpaths.empty": "아직 공구 경로가 없습니다"
   },
@@ -108,6 +120,8 @@
     "cmd.cam.tool.create": "Dụng cụ",
     "cmd.cam.tool.edit": "Sửa dụng cụ",
     "cmd.cam.tool.list": "Thư viện dụng cụ",
+    "cmd.cam.toolpath.contour": "Đường bao",
+    "cmd.cam.toolpath.pocket": "Khoang",
     "help.cam.coordinate_system.create": "Tạo gốc gia công lập trình được và hướng XYZ.\n\nDùng lệnh này để xác định vị trí điểm không của máy trên phôi.",
     "ui.cam.toolpaths.empty": "Chưa có đường chạy dao"
   },
@@ -124,6 +138,8 @@
     "cmd.cam.tool.create": "刀具",
     "cmd.cam.tool.edit": "编辑刀具",
     "cmd.cam.tool.list": "刀具库",
+    "cmd.cam.toolpath.contour": "轮廓",
+    "cmd.cam.toolpath.pocket": "型腔",
     "help.cam.coordinate_system.create": "创建可编程的加工原点和 XYZ 方向。\n\n用于定义机床零点在毛坯上的位置。",
     "ui.cam.toolpaths.empty": "暂无刀轨"
   }
