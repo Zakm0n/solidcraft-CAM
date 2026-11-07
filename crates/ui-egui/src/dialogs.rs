@@ -390,6 +390,8 @@ crate::dialog_descriptor::dialog_descriptors! {
             ChatContext,
             /// Joints and components (`dialogs_assembly`).
             Assembly(crate::dialogs_assembly::Asm),
+            /// The CAM workspace's setup and tool library dialogs (`dialogs_cam`).
+            Cam(crate::dialogs_coupling::cam::Zcam),
             /// Sheet metal (`dialogs_sheet`).
             Sheet(crate::dialogs_sheet::Sm),
             /// Surface tools and Split Face (`dialogs_surface`).
@@ -1115,6 +1117,7 @@ impl Dialog {
                 let (kind, inputs) = Kind::simple_start(id)
                     .map(|(kind, inputs)| (crate::length_input::defaults(&s.doc, kind), inputs))
                     .or_else(|| crate::dialogs_assembly::start(app, id))
+                    .or_else(|| crate::dialogs_coupling::cam::start_workspace(app, id))
                     .or_else(|| crate::dialogs_sheet::start(app, id))
                     .or_else(|| crate::dialogs_surface::start(app, id))
                     .or_else(|| crate::dialogs_save_mesh::start(app, id))
@@ -2610,6 +2613,7 @@ fn title(k: &Kind) -> &'static str {
         Kind::Rename { .. } => "RENAME",
         Kind::ConfirmDelete { .. } => "DELETE FEATURE",
         Kind::Assembly(k) => k.title(),
+        Kind::Cam(k) => k.title(),
         Kind::Sheet(k) => k.title(),
         Kind::Surface(k) => k.title(),
         Kind::SaveMesh(_) => "SAVE AS MESH",
@@ -5974,6 +5978,7 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
         }
         Kind::Sketch | Kind::Measure { .. } => return Ok(Vec::new()),
         Kind::Assembly(k) => return crate::dialogs_assembly::commands(app, k, &d.inputs),
+        Kind::Cam(k) => return crate::dialogs_coupling::cam::zcam_commands(app, k, &d.inputs),
         Kind::Sheet(k) => return crate::dialogs_sheet::commands(app, k, &d.inputs, &d.extra),
         Kind::Surface(k) => return crate::dialogs_surface::commands(app, k, &d.inputs, &d.extra),
         Kind::SketchModify(k) => return crate::sketch_modify_ui::commands(app, k, &d.inputs, &d.extra),

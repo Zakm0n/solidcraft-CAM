@@ -58,6 +58,7 @@ pub mod appearance;
 pub mod bom;
 pub mod browser;
 pub mod cam_coordinate_system;
+pub mod cam_setup;
 pub mod cam_tool;
 pub mod cam_toolpath;
 pub mod canvas;

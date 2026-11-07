@@ -404,7 +404,7 @@ pub const SECTIONS: &[Section] = &[
     Section { tab: "WELDMENTS", panel: "CONFIGURE", promoted: 2, ids: CONFIGURE },
     // The CAM workspace's Toolpath tab: its setups and coordinate systems first, then the milling
     // groups that the toolpath commands will fill.
-    Section { tab: "TOOLPATH", panel: "CREATE", promoted: 1, ids: &["cam.coordinate_system.create"] },
+    Section { tab: "TOOLPATH", panel: "CREATE", promoted: 1, ids: &["cam.coordinate_system.create", "cam.setup.create", "cam.tool.list"] },
     Section { tab: "TOOLPATH", panel: "2D MILLING", promoted: 1, ids: &[] },
     Section { tab: "TOOLPATH", panel: "3D MILLING", promoted: 1, ids: &[] },
 ];
@@ -467,6 +467,8 @@ const LEGACY_RENDER_SECTIONS: &[Section] = &[
 /// retain the engine label. Route these through `tr_label`, like other UI labels.
 pub const RIBBON_LABELS: &[(&str, &str)] = &[
     ("cam.coordinate_system.create", "Origin"),
+    ("cam.setup.create", "Setup"),
+    ("cam.tool.list", "Tools"),
     ("render.batch", "All Shots"),
     ("render.cancel", "Cancel"),
     ("render.export", "Export Image"),
@@ -1587,7 +1589,7 @@ mod tests {
         let lists = crate::toolbar_custom::panel_lists("TOOLPATH");
         assert_eq!(lists.iter().map(|(panel, ..)| *panel).collect::<Vec<_>>(), ["CREATE", "2D MILLING", "3D MILLING"]);
         let create: Vec<_> = lists[0].1.iter().map(|c| c.id).collect();
-        assert_eq!(create, ["cam.coordinate_system.create"], "the Toolpath tab offers the coordinate system");
+        assert_eq!(create, ["cam.coordinate_system.create", "cam.setup.create", "cam.tool.list"], "the Toolpath tab offers the origin, the setup and the tool library");
         assert!(lists[1..].iter().all(|(_, commands, _)| commands.is_empty()), "the milling groups stay stubs");
         assert_eq!(h.call("ui.workspace", json!({"workspace":"design"}))["result"]["workspace"], "design");
         assert_eq!(h.app.ui.tab, "MODEL");

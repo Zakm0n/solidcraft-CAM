@@ -44,6 +44,8 @@ pub static COMMANDS: &[CommandSpec] = &[
             "tool: a tool's id in this design; name?, kind?, diameter?, corner_radius?, flute_length?, flutes?: as cam.tool.create. A key left out keeps what the tool has; changing kind or diameter carries the corner radius with it unless that is given too",
         ),
     CommandSpec::new("cam.tool.list", "Tool Library", crate::checked!("cam.tool.list", list))
+        .at("TOOLPATH", "CREATE")
+        .icon("cam")
         .doc_only()
         .noundo()
         .contract(&LIST_CONTRACT)

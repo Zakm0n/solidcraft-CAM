@@ -111,3 +111,67 @@ fn the_cam_dialog_labels_translate() {
     }
     assert_eq!(crate::i18n::Locale::for_language("zh").label("Knife edge"), "尖顶");
 }
+
+/// The Toolpath tab's Setup dialog builds `cam.setup.create` from its fields and bodies.
+#[test]
+fn the_setup_dialog_creates_a_setup() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.setup.create").expect("the Setup command opens a dialog");
+    if let Kind::Cam(Zcam::Setup(f)) = &mut d.kind {
+        f.name = "Roughing".into();
+        f.stock_x = "100 mm".into();
+        f.stock_y = "80 mm".into();
+        f.stock_z = "20 mm".into();
+        f.offset_z = "5 mm".into();
+    } else {
+        panic!("cam.setup.create has the wrong dialog");
+    }
+    d.inputs[0].items = vec![Sel::Body { name: "Plate".into() }];
+    let cmds = apply_commands(&app, &d).unwrap();
+    assert_eq!(cmds[0].0, "cam.setup.create");
+    assert_eq!(cmds[0].1["name"], "Roughing");
+    assert_eq!(cmds[0].1["stock_size"], json!([100.0, 80.0, 20.0]));
+    assert_eq!(cmds[0].1["stock_offset"], json!([0.0, 0.0, 5.0]));
+    assert_eq!(cmds[0].1["bodies"], json!(["Plate"]));
+    for (id, params) in cmds {
+        app.run(&id, params).unwrap();
+    }
+    assert_eq!(app.session.doc.cam.setups.len(), 1);
+    assert_eq!(app.session.doc.cam.setups[0].name, "Roughing");
+}
+
+/// The Tool Library opens on a new tool, creates it, and opens again on that tool to edit it.
+#[test]
+fn the_tool_library_dialog_creates_and_edits_tools() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.tool.list").expect("the Tool Library command opens a dialog");
+    if let Kind::Cam(Zcam::ToolLibrary(f)) = &mut d.kind {
+        assert_eq!(f.editing, None, "an empty library makes a new tool");
+        f.name = "6 flat".into();
+        f.diameter = "6 mm".into();
+    } else {
+        panic!("cam.tool.list has the wrong dialog");
+    }
+    let cmds = apply_commands(&app, &d).unwrap();
+    assert_eq!(cmds[0].0, "cam.tool.create");
+    assert_eq!(cmds[0].1["diameter"], 6.0);
+    for (id, params) in cmds {
+        app.run(&id, params).unwrap();
+    }
+    assert_eq!(app.session.doc.cam.tools.len(), 1);
+
+    // Reopened, the library selects the tool it has, so OK edits it.
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.tool.list").expect("the Tool Library reopens");
+    if let Kind::Cam(Zcam::ToolLibrary(f)) = &mut d.kind {
+        assert!(f.editing.is_some(), "the only tool is selected for editing");
+        f.diameter = "8 mm".into();
+    }
+    let cmds = apply_commands(&app, &d).unwrap();
+    assert_eq!(cmds[0].0, "cam.tool.edit");
+    assert_eq!(cmds[0].1["tool"], app.session.doc.cam.tools[0].id);
+    assert_eq!(cmds[0].1["diameter"], 8.0);
+    for (id, params) in cmds {
+        app.run(&id, params).unwrap();
+    }
+    assert_eq!(app.session.doc.cam.tools[0].diameter, 8.0);
+}

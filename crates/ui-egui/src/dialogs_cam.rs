@@ -13,9 +13,10 @@ use solidcraft_engine::doc::joints::JointKind;
 
 use super::{ROUND, joint_row, occurrence, pick, picked_radius, trim, turn};
 use crate::SolveApp;
+use crate::dialogs::Kind;
 use crate::dialogs::{combo, field, form_row};
 use crate::dialogs_assembly::Asm;
-use crate::selection::{EDGES, FACES, PROFILES, SelInput, SelectionExt as _, VERTICES};
+use crate::selection::{BODIES, EDGES, FACES, PROFILES, SelInput, SelectionExt as _, VERTICES};
 use crate::theme::Tokens;
 
 /// The follower types, as `joint.cam` takes them, and their labels.
@@ -194,6 +195,314 @@ pub fn animate(s: &Session, f: &CamForm, cmds: &mut Vec<(String, Value)>) {
     if f.animate {
         turn(s, f.a, f.phase, cmds);
     }
+}
+
+// The CAM workspace's own dialogs (`cam.setup.create`, `cam.tool.list`): the machining setup a
+// part is cut in and the tool library it is cut with. The joint cam's dialog above is the
+// assembly feature of the same abbreviation; these forms belong to the Toolpath tab.
+
+/// The CAM workspace forms the Toolpath tab starts.
+#[derive(Clone, Debug)]
+pub enum Zcam {
+    /// A machining setup: its coordinate system, stock and bodies (`cam.setup.create`).
+    Setup(DialogCamSetup),
+    /// The design's tool library: pick a tool to edit, or fill in a new one (`cam.tool.list`).
+    ToolLibrary(DialogCamToolLibrary),
+}
+
+impl Zcam {
+    /// The command OK runs.
+    pub fn command(&self) -> &'static str {
+        match self {
+            Zcam::Setup(_) => "cam.setup.create",
+            Zcam::ToolLibrary(_) => "cam.tool.list",
+        }
+    }
+
+    /// The dialog's heading.
+    pub fn title(&self) -> &'static str {
+        match self {
+            Zcam::Setup(_) => "SETUP",
+            Zcam::ToolLibrary(_) => "TOOL LIBRARY",
+        }
+    }
+}
+
+/// The kinds a tool library entry may have, in the command's spelling, and their labels.
+const TOOL_KINDS: [&str; 3] = ["flat_end_mill", "ball_end_mill", "bull_nose_end_mill"];
+const TOOL_KIND_LABELS: [&str; 3] = ["Flat end mill", "Ball end mill", "Bull nose end mill"];
+
+/// A machining setup's form: its name, coordinate system, raw stock and bodies.
+#[derive(Clone, Debug)]
+pub struct DialogCamSetup {
+    /// Empty: the command names it "Setup" and the first free number.
+    pub name: String,
+    /// Index into the coordinate system choices: 0 is the model origin, n is
+    /// `doc.coordinate_systems[n - 1]`.
+    pub coordinate_system: usize,
+    /// The stock's size along X, Y and Z; 0 along an axis takes the bodies' extent there.
+    pub stock_x: String,
+    pub stock_y: String,
+    pub stock_z: String,
+    /// Where the stock's corner nearest the machine zero sits.
+    pub offset_x: String,
+    pub offset_y: String,
+    pub offset_z: String,
+}
+
+impl DialogCamSetup {
+    fn new(app: &SolveApp) -> Self {
+        let zero = || crate::length_input::default(&app.session.doc, "0");
+        DialogCamSetup {
+            name: String::new(),
+            coordinate_system: 0,
+            stock_x: zero(),
+            stock_y: zero(),
+            stock_z: zero(),
+            offset_x: zero(),
+            offset_y: zero(),
+            offset_z: zero(),
+        }
+    }
+}
+
+/// One entry of the tool library, as `cam.tool.list` reports it.
+#[derive(Clone, Debug)]
+struct CamTool {
+    id: u64,
+    name: String,
+    kind: usize,
+    diameter: f64,
+    corner_radius: f64,
+    flute_length: f64,
+    flutes: u32,
+}
+
+/// The design's tools, from `cam.tool.list`; empty when the library is empty.
+fn cam_tools(app: &SolveApp) -> Vec<CamTool> {
+    let mut session = app.session.scratch();
+    let Ok(reply) = session.execute("cam.tool.list", &json!({})) else { return Vec::new() };
+    let Some(tools) = reply.get("tools").and_then(Value::as_array) else { return Vec::new() };
+    tools
+        .iter()
+        .filter_map(|tool| {
+            let kind = tool.get("kind").and_then(Value::as_str).and_then(|kind| TOOL_KINDS.iter().position(|k| *k == kind)).unwrap_or(0);
+            Some(CamTool {
+                id: tool.get("id")?.as_u64()?,
+                name: tool.get("name")?.as_str()?.to_string(),
+                kind,
+                diameter: tool.get("diameter").and_then(Value::as_f64).unwrap_or(0.0),
+                corner_radius: tool.get("corner_radius").and_then(Value::as_f64).unwrap_or(0.0),
+                flute_length: tool.get("flute_length").and_then(Value::as_f64).unwrap_or(0.0),
+                flutes: tool.get("flutes").and_then(Value::as_u64).unwrap_or(0) as u32,
+            })
+        })
+        .collect()
+}
+
+/// The tool library's form: the tool being edited (0 is a new one) and its cutting values.
+#[derive(Clone, Debug)]
+pub struct DialogCamToolLibrary {
+    /// Index into the tool choices: 0 makes a new tool, n edits the nth tool.
+    pub selected: usize,
+    /// The selection `selected` last filled the fields from, so typing is never overwritten.
+    shown: usize,
+    /// The tool being edited; none makes a new one.
+    pub editing: Option<u64>,
+    pub name: String,
+    /// Index into [`TOOL_KINDS`].
+    pub kind: usize,
+    pub diameter: String,
+    pub corner_radius: String,
+    pub flute_length: String,
+    pub flutes: String,
+}
+
+impl DialogCamToolLibrary {
+    fn new(app: &SolveApp) -> Self {
+        let tools = cam_tools(app);
+        let mut form = DialogCamToolLibrary {
+            selected: 0,
+            shown: 0,
+            editing: None,
+            name: String::new(),
+            kind: 0,
+            diameter: crate::length_input::default(&app.session.doc, "6"),
+            corner_radius: crate::length_input::default(&app.session.doc, "0"),
+            flute_length: crate::length_input::default(&app.session.doc, "0"),
+            flutes: "0".into(),
+        };
+        // A library with tools opens on the first one, ready to edit.
+        if !tools.is_empty() {
+            form.select(1, &tools, &app.session.doc);
+        }
+        form
+    }
+
+    /// Fill the fields from the selection's tool, or the defaults for a new one.
+    fn select(&mut self, selected: usize, tools: &[CamTool], doc: &solidcraft_engine::doc::Document) {
+        self.selected = selected;
+        self.shown = selected;
+        match selected.checked_sub(1).and_then(|i| tools.get(i)) {
+            Some(tool) => {
+                self.editing = Some(tool.id);
+                self.name = tool.name.clone();
+                self.kind = tool.kind;
+                self.diameter = crate::length_input::shown(doc, tool.diameter);
+                self.corner_radius = crate::length_input::shown(doc, tool.corner_radius);
+                self.flute_length = crate::length_input::shown(doc, tool.flute_length);
+                self.flutes = tool.flutes.to_string();
+            }
+            None => {
+                self.editing = None;
+                self.name.clear();
+                self.kind = 0;
+                self.diameter = crate::length_input::default(doc, "6");
+                self.corner_radius = crate::length_input::default(doc, "0");
+                self.flute_length = crate::length_input::default(doc, "0");
+                self.flutes = "0".into();
+            }
+        }
+    }
+}
+
+/// Start the CAM workspace dialog `id` opens; none for another command.
+pub fn start_workspace(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
+    match id {
+        "cam.setup.create" => Some((Kind::Cam(Zcam::Setup(DialogCamSetup::new(app))), vec![SelInput::new("Bodies", BODIES, true)])),
+        "cam.tool.list" => Some((Kind::Cam(Zcam::ToolLibrary(DialogCamToolLibrary::new(app))), Vec::new())),
+        _ => None,
+    }
+}
+
+/// The CAM workspace dialogs' rows; true when Enter was pressed in a value.
+pub fn zcam_rows(app: &mut SolveApp, ui: &mut egui::Ui, form: &mut Zcam) -> bool {
+    match form {
+        Zcam::Setup(f) => setup_rows(app, ui, f),
+        Zcam::ToolLibrary(f) => tool_rows(app, ui, f),
+    }
+}
+
+fn setup_rows(app: &mut SolveApp, ui: &mut egui::Ui, f: &mut DialogCamSetup) -> bool {
+    let mut enter = false;
+    enter |= crate::ui_kit::text_row(ui, "Name", &mut f.name, "").0;
+    let names: Vec<&str> = app.session.doc.coordinate_systems.iter().map(|c| c.name.as_str()).collect();
+    let mut choices = Vec::with_capacity(names.len() + 1);
+    choices.push(crate::i18n::tr_label("Model origin"));
+    choices.extend(names.iter().copied());
+    f.coordinate_system = f.coordinate_system.min(names.len());
+    crate::ui_kit::choice_row(ui, "Coordinate system", "cam_setup_cs", &mut f.coordinate_system, &choices);
+    enter |= crate::ui_kit::expr_row(ui, "Stock X", &mut f.stock_x);
+    enter |= crate::ui_kit::expr_row(ui, "Stock Y", &mut f.stock_y);
+    enter |= crate::ui_kit::expr_row(ui, "Stock Z", &mut f.stock_z);
+    enter |= crate::ui_kit::expr_row(ui, "Offset X", &mut f.offset_x);
+    enter |= crate::ui_kit::expr_row(ui, "Offset Y", &mut f.offset_y);
+    enter |= crate::ui_kit::expr_row(ui, "Offset Z", &mut f.offset_z);
+    enter
+}
+
+fn tool_rows(app: &mut SolveApp, ui: &mut egui::Ui, f: &mut DialogCamToolLibrary) -> bool {
+    let mut enter = false;
+    let tools = cam_tools(app);
+    let mut choices: Vec<&str> = Vec::with_capacity(tools.len() + 1);
+    choices.push(crate::i18n::tr_label("New tool"));
+    choices.extend(tools.iter().map(|t| t.name.as_str()));
+    f.selected = f.selected.min(tools.len());
+    if crate::ui_kit::choice_row(ui, "Tool", "cam_tool_pick", &mut f.selected, &choices).changed() {
+        let doc = app.session.doc.clone();
+        f.select(f.selected, &tools, &doc);
+    }
+    enter |= crate::ui_kit::text_row(ui, "Name", &mut f.name, "").0;
+    crate::ui_kit::choice_row(ui, "Type", "cam_tool_kind", &mut f.kind, &TOOL_KIND_LABELS);
+    enter |= crate::ui_kit::expr_row(ui, "Diameter", &mut f.diameter);
+    enter |= crate::ui_kit::expr_row(ui, "Corner radius", &mut f.corner_radius);
+    enter |= crate::ui_kit::expr_row(ui, "Flute length", &mut f.flute_length);
+    enter |= crate::ui_kit::expr_row(ui, "Flutes", &mut f.flutes);
+    enter
+}
+
+/// The commands OK runs for a CAM workspace dialog.
+pub fn zcam_commands(app: &SolveApp, form: &Zcam, inputs: &[SelInput]) -> Result<Vec<(String, Value)>, String> {
+    match form {
+        Zcam::Setup(f) => setup_commands(app, f, inputs),
+        Zcam::ToolLibrary(f) => tool_commands(app, f),
+    }
+}
+
+fn setup_commands(app: &SolveApp, f: &DialogCamSetup, inputs: &[SelInput]) -> Result<Vec<(String, Value)>, String> {
+    let s = &app.session;
+    let length = |label: &str, text: &str| setup_length(s, label, text);
+    let mut p = json!({
+        "stock_size": [length("Stock X", &f.stock_x)?, length("Stock Y", &f.stock_y)?, length("Stock Z", &f.stock_z)?],
+        "stock_offset": [length("Offset X", &f.offset_x)?, length("Offset Y", &f.offset_y)?, length("Offset Z", &f.offset_z)?],
+    });
+    if let Some(cs) = f.coordinate_system.checked_sub(1).and_then(|i| s.doc.coordinate_systems.get(i)) {
+        p["coordinate_system"] = json!(cs.id);
+    }
+    let name = f.name.trim();
+    if !name.is_empty() {
+        p["name"] = json!(name);
+    }
+    let bodies: Vec<String> = inputs.first().map(|i| i.items.body_names()).unwrap_or_default();
+    if !bodies.is_empty() {
+        p["bodies"] = json!(bodies);
+    }
+    Ok(vec![("cam.setup.create".to_string(), p)])
+}
+
+/// A setup's length field: an empty field is 0, the command's "read the bodies" default.
+fn setup_length(s: &Session, label: &str, text: &str) -> Result<f64, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(0.0);
+    }
+    crate::length_input::eval(&s.doc, text, solidcraft_engine::doc::expr::Kind::Length)
+        .map_err(|e| format!("{}: {e}", crate::i18n::tr_label(label)))
+}
+
+fn tool_commands(app: &SolveApp, f: &DialogCamToolLibrary) -> Result<Vec<(String, Value)>, String> {
+    let s = &app.session;
+    if f.diameter.trim().is_empty() {
+        return Err("enter the tool's diameter".into());
+    }
+    let diameter = crate::length_input::eval(&s.doc, &f.diameter, solidcraft_engine::doc::expr::Kind::Length)
+        .map_err(|e| format!("{}: {e}", crate::i18n::tr_label("Diameter")))?;
+    let mut p = json!({
+        "kind": TOOL_KINDS.get(f.kind).copied().unwrap_or("flat_end_mill"),
+        "diameter": diameter,
+    });
+    let optional = |key: &str, text: &str| -> Result<Option<f64>, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        crate::length_input::eval(&s.doc, text, solidcraft_engine::doc::expr::Kind::Length)
+            .map(Some)
+            .map_err(|e| format!("{}: {e}", crate::i18n::tr_label(key)))
+    };
+    if let Some(radius) = optional("Corner radius", &f.corner_radius)? {
+        p["corner_radius"] = json!(radius);
+    }
+    if let Some(length) = optional("Flute length", &f.flute_length)? {
+        p["flute_length"] = json!(length);
+    }
+    let flutes = f.flutes.trim();
+    if !flutes.is_empty() {
+        let count: u32 = flutes.parse().map_err(|_| format!("{}: enter a whole number", crate::i18n::tr_label("Flutes")))?;
+        p["flutes"] = json!(count);
+    }
+    let name = f.name.trim();
+    if !name.is_empty() {
+        p["name"] = json!(name);
+    }
+    let command = match f.editing {
+        Some(tool) => {
+            p["tool"] = json!(tool);
+            "cam.tool.edit"
+        }
+        None => "cam.tool.create",
+    };
+    Ok(vec![(command.to_string(), p)])
 }
 
 #[cfg(test)]

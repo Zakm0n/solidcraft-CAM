@@ -100,6 +100,7 @@ pub(super) fn command(kind: &Kind) -> Option<&'static str> {
             crate::dialogs_assembly::Asm::Drive { .. } => Some("joint.drive"),
             crate::dialogs_assembly::Asm::Interference { .. } => Some("inspect.interference"),
         },
+        Kind::Cam(k) => Some(k.command()),
         _ => kind.simple_metadata().map(|(command, _)| command),
     }
 }
@@ -389,6 +390,7 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
     match &mut d.kind {
         Kind::Material { index, editor } => crate::material_editor::rows(app, ui, index, editor),
         Kind::Appearance(k) => enter |= crate::dialogs_appearance::rows(app, ui, k, &mut d.inputs),
+        Kind::Cam(k) => enter |= crate::dialogs_coupling::cam::zcam_rows(app, ui, k),
         Kind::Motion(k) => enter |= crate::dialogs_motion::rows(app, ui, k, &mut d.inputs),
         Kind::Part(k) => enter |= crate::dialogs_parts::rows(app, ui, k, &d.inputs),
         Kind::PartSize(k) => enter |= crate::dialogs_part_size::rows(app, ui, k),
