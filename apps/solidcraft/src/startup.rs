@@ -390,7 +390,7 @@ pub fn max_file_size(value: Option<&str>) -> Result<u64, String> {
 pub fn no_window_message(error: &str, settings: Option<&Path>) -> String {
     let folder = settings.map(|d| d.display().to_string()).unwrap_or_else(|| "the SolidCraft settings folder".into());
     format!(
-        "SolidCraft could not open its window.\n\n{error}\n\n\
+        "Z-CAM could not open its window.\n\n{error}\n\n\
          The software renderer was tried too. Things to try:\n\
          - Install or update the graphics driver (on Windows, from the GPU maker's site rather than Windows Update).\n\
          - Over Remote Desktop or in a virtual machine, enable 3D acceleration or run it on the machine itself.\n\

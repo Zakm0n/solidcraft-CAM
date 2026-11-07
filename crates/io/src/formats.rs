@@ -162,7 +162,7 @@ pub static DESIGN_SAVE_OPTIONS: &[OptionSpec] = &[
     OptionSpec {
         param: "format",
         label: "Format",
-        kind: OptionKind::Choice { choices: &[("container", "SolidCraft container"), ("json", "Plain JSON design")], default: 0 },
+        kind: OptionKind::Choice { choices: &[("container", "Z-CAM container"), ("json", "Plain JSON design")], default: 0 },
     },
     OptionSpec {
         param: "compression",

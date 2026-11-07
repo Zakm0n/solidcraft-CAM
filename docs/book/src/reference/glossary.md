@@ -181,6 +181,21 @@ They are listed together in the browser's *Construction* folder.
 - **Elsewhere:** construction plane, reference plane, datum plane (and axis, point).
 - **For translators:** not a sketch's construction entity.
 
+### coordinate system
+
+A machining origin with its own X, Y and Z directions, which a toolpath uses as its machine zero.
+
+A coordinate system is not part of a body: it places a setup on the stock, and it is listed in the
+browser's *Coordinate Systems* folder.
+
+- **In SolidCraft:** `cam.coordinate_system.create`; the `coordinate_systems` design-file key and
+  its `origin`, `x_axis`, `y_axis` and `z_axis` fields; the browser's *Coordinate Systems* folder
+  and the `ui.browser.coordinate_systems` catalogue entry.
+- **Don't use:** work origin, setup (for the coordinate system itself).
+- **Elsewhere:** work coordinate system, WCS, local coordinate system.
+- **For translators:** not a *construction plane*, which places sketch and feature geometry and
+  belongs to the model.
+
 ### curve
 
 A sketch entity that is not a point: a line, an arc, a circle, an ellipse, a spline or a conic.
@@ -485,6 +500,20 @@ The ordered list of a design's features, which SolidCraft computes from first to
 - **Don't use:** feature history, history (for the timeline).
 - **Elsewhere:** timeline, history, feature tree.
 - **For translators:** not the undo history.
+
+### toolpath
+
+The path the cutting tool follows to remove material, at the depth and feed of one CAM operation.
+
+Toolpaths are listed in the *Toolpaths* panel of the CAM workspace, and each one cuts relative to a
+*coordinate system*.
+
+- **In SolidCraft:** the `ui.cam.toolpaths` and `ui.tab.toolpath` catalogue entries; the TOOLPATH
+  ribbon tab of the CAM workspace.
+- **Don't use:** tool path, cutter path, operation (for the path itself).
+- **Elsewhere:** toolpath, cutter location path, CL path.
+- **For translators:** the path itself; a setup is the stock, coordinate system and toolpaths
+  together.
 
 ### turn (of two rounds)
 
