@@ -2472,6 +2472,7 @@ fn same_but_features(a: &Document, b: &Document) -> bool {
         canvases,
         point_clouds,
         coordinate_systems,
+        cam,
         param_comments,
         materials,
         print_faces,
@@ -2509,6 +2510,7 @@ fn same_but_features(a: &Document, b: &Document) -> bool {
         && *canvases == b.canvases
         && *point_clouds == b.point_clouds
         && *coordinate_systems == b.coordinate_systems
+        && *cam == b.cam
         && *param_comments == b.param_comments
         && *materials == b.materials
         && *print_faces == b.print_faces

@@ -160,6 +160,8 @@ pub fn reselect_parts(text: &str) -> Option<(&str, &str)> {
 pub type Result<T> = std::result::Result<T, DocError>;
 
 #[cfg(test)]
+mod cam_tests;
+#[cfg(test)]
 mod coil_tests;
 #[cfg(test)]
 mod feature_walk_tests;

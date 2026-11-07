@@ -3225,6 +3225,9 @@ pub struct Document {
     /// CAM coordinate systems: the machine zero and axes each toolpath works from.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub coordinate_systems: Vec<crate::cam::CoordinateSystem>,
+    /// CAM setups, the tool library and the toolpaths that cut the design.
+    #[serde(default, skip_serializing_if = "crate::cam::CamSettings::is_empty")]
+    pub cam: crate::cam::CamSettings,
     /// Comments of feature-input parameters (by name).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub param_comments: std::collections::BTreeMap<String, String>,
@@ -3501,6 +3504,7 @@ impl Document {
             .chain(self.canvases.iter().map(|c| c.id))
             .chain(self.point_clouds.iter().map(|c| c.id))
             .chain(self.coordinate_systems.iter().map(|c| c.id))
+            .chain(self.cam.ids())
             .chain(a.joints.iter().map(|j| j.id))
             .chain(a.contact_sets.iter().map(|c| c.id))
             .chain(a.studies.iter().map(|s| s.id))
@@ -3552,6 +3556,7 @@ impl Document {
             canvases: Vec::new(),
             point_clouds: Vec::new(),
             coordinate_systems: Vec::new(),
+            cam: Default::default(),
             param_comments: Default::default(),
             browser_groups: Vec::new(),
             timeline_groups: Vec::new(),

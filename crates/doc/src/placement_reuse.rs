@@ -162,6 +162,7 @@ fn same_geometry_inputs(a: &Document, b: &Document) -> bool {
         visibility,
         point_clouds,
         coordinate_systems,
+        cam,
     } = a;
     (Arc::ptr_eq(render, &b.render) || *render == b.render)
         && *format == b.format
@@ -199,6 +200,7 @@ fn same_geometry_inputs(a: &Document, b: &Document) -> bool {
         && *visibility == b.visibility
         && *point_clouds == b.point_clouds
         && *coordinate_systems == b.coordinate_systems
+        && *cam == b.cam
 }
 
 /// Compare feature definitions without traversing immutable imported payloads. A replacement

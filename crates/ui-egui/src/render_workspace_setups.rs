@@ -472,6 +472,7 @@ pub(super) fn same_model_source(app: &SolveApp, document: &std::sync::Weak<solid
         canvases,
         point_clouds,
         coordinate_systems,
+        cam,
         param_comments,
         materials,
         print_faces,
