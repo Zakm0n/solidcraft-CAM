@@ -2819,3 +2819,58 @@ fn a_section_card_shows_every_row_and_reads_like_its_pill() {
         }
     }
 }
+
+#[test]
+fn a_coordinate_system_shows_its_gnomon_where_it_sits() {
+    let mut h = Harness::new();
+    h.app.run("cam.coordinate_system.create", json!({"origin":[10, 0, 0], "name":"Setup"})).unwrap();
+    h.frames(2);
+    let t = crate::theme::Tokens::get();
+    let triads = crate::cam_gnomon::gnomons(&h.app);
+    assert_eq!(triads.len(), 1);
+    let g = &triads[0];
+    assert_eq!(g.name, "Setup");
+    assert_eq!(g.origin, Vec3::new(10.0, 0.0, 0.0), "the machining origin, in model space");
+    assert_eq!(g.colours, [t.axis_x, t.axis_y, t.axis_z], "each arm takes the view's own axis colour");
+    let len = g.tips[0].dist(g.origin);
+    assert!(len > 0.0);
+    for (tip, axis) in g.tips.iter().zip([Vec3::X, Vec3::Y, Vec3::Z]) {
+        assert!(tip.dist(g.origin + axis * len) < 1e-9, "the arm points along {axis:?}: {tip:?}");
+    }
+    // The arms follow the zoom, as the joint origins' triads do: a nearer camera draws them shorter.
+    let near = h.app.cam.distance;
+    let mut moved = h.app.cam;
+    moved.distance *= 2.0;
+    h.app.cam = moved;
+    let longer = crate::cam_gnomon::gnomons(&h.app)[0].tips[0].dist(g.origin);
+    assert!(longer > len * 1.5, "a camera twice as far draws arms about twice as long: {len} → {longer}");
+    moved.distance = near;
+    h.app.cam = moved;
+    h.frames(2);
+    // Drawn, and found by its handles.
+    assert_eq!(crate::scenario::count_of("cam:gnomons"), Some(1.0));
+    assert!(crate::scenario::handle_at("cam:gnomon:Setup").is_some(), "the origin");
+    for axis in ["x", "y", "z"] {
+        assert!(crate::scenario::handle_at(&format!("cam:gnomon:Setup:{axis}")).is_some(), "{axis} arm");
+    }
+    // A turned machine: the arms follow the machine's own axes, not the world's.
+    h.app
+        .run(
+            "cam.coordinate_system.create",
+            json!({"origin":[0, 20, 0], "x_axis":[0, 2, 0], "y_axis":[-3, 0, 0], "z_axis":[0, 0, 1], "name":"Turned"}),
+        )
+        .unwrap();
+    h.frames(2);
+    assert_eq!(crate::scenario::count_of("cam:gnomons"), Some(2.0));
+    let turned = crate::cam_gnomon::gnomons(&h.app).into_iter().find(|g| g.name == "Turned").expect("the turned system");
+    let x = turned.tips[0] - turned.origin;
+    assert!(x.dist(Vec3::Y * len) < 1e-9, "any length of direction is stored as a unit vector: {x:?}");
+    // A design that holds a non-finite point is input, not a crash: its triad is left out.
+    let mut hostile = h.app.session.doc.coordinate_systems[0].clone();
+    hostile.name = "Hostile".into();
+    hostile.origin = [f64::NAN, 0.0, 0.0];
+    h.app.session.doc_mut().coordinate_systems.push(hostile);
+    h.frames(2);
+    assert!(crate::cam_gnomon::gnomons(&h.app).iter().all(|g| g.name != "Hostile"));
+    assert_eq!(crate::scenario::count_of("cam:gnomons"), Some(2.0));
+}
