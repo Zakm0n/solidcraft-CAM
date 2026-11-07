@@ -86,10 +86,14 @@ pub fn tab_label(tab: &str) -> &str {
     tab.strip_prefix("RENDER ").unwrap_or(tab)
 }
 
-/// A tab's registry name in normal word casing: "SHEET METAL" → "Sheet Metal".
+/// A tab's registry name in normal word casing: "SHEET METAL" → "Sheet Metal". A word with a
+/// digit in it keeps its case, so "2D MILLING" stays "2D Milling".
 pub fn word_cased(name: &str) -> String {
     name.split_whitespace()
         .map(|word| {
+            if word.chars().any(|c| c.is_ascii_digit()) {
+                return word.to_string();
+            }
             let lower = word.to_lowercase();
             let mut chars = lower.chars();
             chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
@@ -1571,6 +1575,8 @@ mod tests {
 
     #[test]
     fn cam_workspace_shows_only_the_toolpath_tab_and_keeps_its_empty_groups() {
+        assert_eq!(word_cased("2D MILLING"), "2D Milling", "digits keep their case in ribbon headings");
+        assert_eq!(word_cased("SHEET METAL"), "Sheet Metal");
         let mut h = crate::scenario::Harness::new();
         assert_eq!(h.call("ui.workspace", json!({"workspace":"cam"}))["result"]["workspace"], "cam");
         h.frames(2);
