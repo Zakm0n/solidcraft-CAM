@@ -1231,10 +1231,21 @@ pub fn browser(app: &mut SolveApp, ui: &mut egui::Ui) {
     }
     let reveals = reveals(app);
     let collapsed = vertical && !stacked && !reveals && app.preferences.timeline_left_browser_collapsed;
-    let bounds = if stacked {
+    let mut bounds = if stacked {
         crate::timeline_left::stacked_rects(app, available).0
     } else {
         panel_bounds(available, if vertical { None } else { app.shell.history }, if collapsed { collapsed_width() } else { width }, gap)
+    };
+    // The CAM workspace splits the left column: the Browser above, its Toolpaths panel below.
+    let toolpaths = if crate::workspace::current(app) == crate::workspace::Workspace::Cam && !crate::dialog_column::holds(app) {
+        let split = bounds.height() * 0.6;
+        let seam = gap.min(t.space_8);
+        let browser_bounds = Rect::from_min_max(bounds.min, pos2(bounds.right(), bounds.top() + split));
+        let toolpaths_bounds = Rect::from_min_max(pos2(bounds.left(), browser_bounds.bottom() + seam), bounds.max);
+        bounds = browser_bounds;
+        Some(toolpaths_bounds)
+    } else {
+        None
     };
     let opacity = if reveals {
         let edge = Rect::from_min_max(pos2(available.left(), bounds.top()), pos2(bounds.left() + t.space_10, bounds.bottom()));
@@ -1286,6 +1297,13 @@ pub fn browser(app: &mut SolveApp, ui: &mut egui::Ui) {
         if app.preferences.browser_float {
             crate::scenario::publish_rect("browser:float", rect);
         }
+    }
+    // The CAM workspace's Toolpaths card shares the column below the Browser and keeps its
+    // pointer from reaching the view (the union is what the shell shields).
+    if let Some(toolpaths) = toolpaths.filter(|b| b.is_finite() && b.is_positive())
+        && let Some(rect) = crate::cam_browser::toolpaths_panel(app, ui, toolpaths)
+    {
+        app.shell.browser = Some(app.shell.browser.map_or(rect, |browser| browser.union(rect)));
     }
 }
 
@@ -1825,6 +1843,7 @@ fn component_rows_inner(
         doc_settings(app, ui, d);
         named_view_rows(app, ui, d, acts);
         origin_rows(app, ui, d, acts);
+        coordinate_system_folder_rows(app, ui, d);
         canvas_rows(app, ui, d, acts);
         point_clouds::rows(app, ui, d, acts);
         analysis_rows(app, ui, d, acts);
@@ -2200,6 +2219,41 @@ fn origin_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize, acts: &mut A
             pick_from_browser(app, x);
         }
     }
+    // The machining origins, next to the planes a setup is placed on.
+    coordinate_system_rows(app, ui, depth + 1);
+}
+
+/// The CAM coordinate systems a machining operation works from: the machining origin and the
+/// machine's own axes. They are listed under the Origin's planes, next to the planes they sit
+/// on, and in their own folder ([`coordinate_system_folder_rows`]).
+fn coordinate_system_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize) {
+    let names: Vec<String> = app.session.doc.coordinate_systems.iter().map(|c| c.name.clone()).collect();
+    for (i, name) in names.iter().enumerate() {
+        let _ = draw_row(
+            ui,
+            ui.scope_id().with(("coordinate_system", i)),
+            &Row { depth, icon: "origin", label: name, name: true, ..Default::default() },
+        );
+    }
+}
+
+/// The design's Coordinate Systems folder: the same CAM coordinate systems, in the browser's
+/// top level so a setup finds them without unfolding the Origin (#Z-CAM).
+fn coordinate_system_folder_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize) {
+    let key = "coordinate_systems";
+    let open = is_open(app, key, true);
+    let r = draw_row(
+        ui,
+        ui.scope_id().with(key),
+        &Row { depth, fold: Some(open), icon: "folder", label: crate::i18n::tr("ui.browser.coordinate_systems"), ..Default::default() },
+    );
+    if r.fold || r.clicked {
+        toggle(app, key, true);
+    }
+    if !open {
+        return;
+    }
+    coordinate_system_rows(app, ui, depth + 1);
 }
 
 /// The standard views listed under Named Views: (label, view).
