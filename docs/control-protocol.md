@@ -983,7 +983,7 @@ Other `ui.prefs` parameters:
 - `stand_up: true` stands up a just-opened Y-up file, `stand_up: false` leaves it as it is ("Leave it": the offer, dialog or note, closes and `offer_stand_up` stays on)
 - the dialog's buttons are the handles `stand_up:stand`, `stand_up:leave` and `stand_up:never`
 
-`ui.workspace {workspace?: "design" | "render"}` reads or changes the active workspace.
+`ui.workspace {workspace?: "design" | "render" | "cam"}` reads or changes the active workspace.
 Entering Render requires finishing the current modelling operation; returning restores
 the Design camera. See [the integrated Render workspace](render-workspace.md).
 

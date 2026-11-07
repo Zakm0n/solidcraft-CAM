@@ -6,8 +6,81 @@ use solidcraft_engine::doc::FeatureKind;
 
 pub const RENDER_TABS: &[&str] = &["RENDER"];
 
+/// The CAM workspace's tabs. Toolpath is its home and, like Render's tabs, the only one: the CAM
+/// workspace owns the ribbon while it is open.
+pub const CAM_TABS: &[&str] = &["TOOLPATH"];
+
 pub fn render_tab(tab: &str) -> bool {
     RENDER_TABS.contains(&tab)
+}
+
+pub fn cam_tab(tab: &str) -> bool {
+    CAM_TABS.contains(&tab)
+}
+
+/// The workspaces the workspace switcher offers. Machine Simulation is listed while it is being
+/// built but cannot be entered yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Workspace {
+    Design,
+    Render,
+    Cam,
+    MachineSimulation,
+}
+
+impl Workspace {
+    /// The workspace's key in `ui.workspace` and in the switcher's item parameters.
+    pub fn key(self) -> &'static str {
+        match self {
+            Workspace::Design => "design",
+            Workspace::Render => "render",
+            Workspace::Cam => "cam",
+            Workspace::MachineSimulation => "machine_simulation",
+        }
+    }
+
+    /// The workspace a key names; `None` for a workspace that cannot be entered.
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "design" => Some(Workspace::Design),
+            "render" => Some(Workspace::Render),
+            "cam" => Some(Workspace::Cam),
+            _ => None,
+        }
+    }
+}
+
+/// The workspace the app is in now.
+pub fn current(app: &crate::SolveApp) -> Workspace {
+    if crate::render_workspace::active(app) {
+        Workspace::Render
+    } else if cam_tab(&app.ui.tab) {
+        Workspace::Cam
+    } else {
+        Workspace::Design
+    }
+}
+
+/// Enter a workspace. Render and CAM need no running sketch, tool or dialog, and keep their own
+/// silent 3D view; Design returns to the Model tab.
+pub fn enter(app: &mut crate::SolveApp, workspace: Workspace) -> Result<(), String> {
+    match workspace {
+        Workspace::Design => crate::render_workspace::enter(app, false),
+        Workspace::Render => crate::render_workspace::enter(app, true),
+        Workspace::Cam => {
+            if cam_tab(&app.ui.tab) {
+                return Ok(());
+            }
+            if app.session.active_sketch.is_some() || app.tool.is_some() || app.dialog.is_some() || app.file_load.busy() {
+                return Err(crate::i18n::tr("render.error_finish_operation").into());
+            }
+            // Leave Render the normal way (it restores the Design camera), then open Toolpath.
+            crate::render_workspace::enter(app, false)?;
+            app.ui.tab = CAM_TABS[0].to_string();
+            Ok(())
+        }
+        Workspace::MachineSimulation => Ok(()),
+    }
 }
 pub fn tab_label(tab: &str) -> &str {
     tab.strip_prefix("RENDER ").unwrap_or(tab)
@@ -325,6 +398,11 @@ pub const SECTIONS: &[Section] = &[
     Section { tab: "WELDMENTS", panel: "SKETCH", promoted: 1, ids: &["sketch.create"] },
     Section { tab: "WELDMENTS", panel: "CREATE", promoted: 1, ids: &["frame.member"] },
     Section { tab: "WELDMENTS", panel: "CONFIGURE", promoted: 2, ids: CONFIGURE },
+    // The CAM workspace's Toolpath tab: its setups and coordinate systems first, then the milling
+    // groups that the toolpath commands will fill.
+    Section { tab: "TOOLPATH", panel: "CREATE", promoted: 1, ids: &[] },
+    Section { tab: "TOOLPATH", panel: "2D MILLING", promoted: 1, ids: &[] },
+    Section { tab: "TOOLPATH", panel: "3D MILLING", promoted: 1, ids: &[] },
 ];
 
 // Migration data only: Render commands remain registered, but have no live ribbon sections.
@@ -670,6 +748,9 @@ pub fn visible_tabs(app: &crate::SolveApp) -> Vec<&'static str> {
     if crate::render_workspace::active(app) {
         return Vec::new();
     }
+    if cam_tab(&app.ui.tab) {
+        return CAM_TABS.to_vec();
+    }
     let mut tabs: Vec<_> = TABS.iter().copied().filter(|tab| tab_turned_on(app, tab)).collect();
     if app.preferences.sketch_tab_always {
         // Right after MODEL, whether a sketch is open or not (#7904).
@@ -704,7 +785,7 @@ pub fn starts_a_sketch(app: &crate::SolveApp, id: &str) -> bool {
 /// other tabs to remain usable for the rest of that context. Sketch takes precedence over sheet
 /// metal, and sheet metal over weldments.
 pub fn sync_context(app: &mut crate::SolveApp) {
-    if crate::render_workspace::active(app) {
+    if crate::render_workspace::active(app) || cam_tab(&app.ui.tab) {
         return;
     }
     let context = app
@@ -1486,5 +1567,20 @@ mod tests {
         for section in SECTIONS.iter().filter(|s| s.panel == "SKETCH") {
             assert!(!section.ids.contains(&"sketch.move3d"), "{}/{} must not offer sketch.move3d on the ribbon", section.tab, section.panel);
         }
+    }
+
+    #[test]
+    fn cam_workspace_shows_only_the_toolpath_tab_and_keeps_its_empty_groups() {
+        let mut h = crate::scenario::Harness::new();
+        assert_eq!(h.call("ui.workspace", json!({"workspace":"cam"}))["result"]["workspace"], "cam");
+        h.frames(2);
+        assert_eq!(current(&h.app), Workspace::Cam);
+        assert_eq!(visible_tabs(&h.app), CAM_TABS);
+        assert_eq!(panels("TOOLPATH"), ["CREATE", "2D MILLING", "3D MILLING"]);
+        let lists = crate::toolbar_custom::panel_lists("TOOLPATH");
+        assert_eq!(lists.iter().map(|(panel, ..)| *panel).collect::<Vec<_>>(), ["CREATE", "2D MILLING", "3D MILLING"]);
+        assert!(lists.iter().all(|(_, commands, _)| commands.is_empty()));
+        assert_eq!(h.call("ui.workspace", json!({"workspace":"design"}))["result"]["workspace"], "design");
+        assert_eq!(h.app.ui.tab, "MODEL");
     }
 }

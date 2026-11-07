@@ -1291,12 +1291,13 @@ fn toolbar_pins_removes_reorders_and_keeps_its_layout() {
 }
 
 #[test]
-fn the_workspace_menu_lists_design_and_render_and_greys_future_workspaces() {
+fn the_workspace_menu_lists_design_render_and_cam_and_greys_machine_simulation() {
     let app = sample_app();
     let items = context_menu::items(&app, &Target::Workspace);
     assert!(find(&items, "Design").enabled);
     assert!(find(&items, "Render").enabled);
-    assert!(!find(&items, "Animation").enabled);
+    assert!(find(&items, "CAM").enabled);
+    assert!(!find(&items, "Machine Simulation").enabled);
     assert!(!items.iter().any(|i| i.label.contains("Generative")));
 }
 

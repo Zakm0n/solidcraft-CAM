@@ -1369,9 +1369,9 @@ fn ribbon_tabs(app: &mut SolveApp, ui: &mut egui::Ui, row: Rect) -> Option<bool>
         })
         .collect();
     // A plus after the last tab opens the toolbar's menu, so tabs can be shown or hidden without
-    // knowing about the right-click; it stays when every tab is hidden. The Render workspace's
-    // one tab can't be hidden.
-    let add = !crate::render_workspace::active(app);
+    // knowing about the right-click; it stays when every tab is hidden. The Render and CAM
+    // workspaces own their tabs, so they can't be hidden.
+    let add = !crate::render_workspace::active(app) && !crate::workspace::cam_tab(&app.ui.tab);
     let add_size = TAB_ROW_HEIGHT - 2.0 * RIBBON_TAB_INSET;
     let tabs_width: f32 = widths.iter().sum::<f32>()
         + tabs.len().saturating_sub(1) as f32 * 2.0
@@ -1697,11 +1697,19 @@ fn ribbon_contents(app: &mut SolveApp, ui: &mut egui::Ui, shape: RibbonShape) ->
             t.secondary_line(&painter, [ws.right_top(), ws.right_bottom()], t.border);
         }
         let render = crate::render_workspace::active(app);
+        let cam = crate::workspace::cam_tab(&app.ui.tab);
+        let workspace_name = if render {
+            app.tr("ui.render")
+        } else if cam {
+            app.tr("ui.workspace.cam")
+        } else {
+            app.tr("ui.design")
+        };
         if render {
             crate::ui_kit::StageBar::workspace(ui, ws, "ws_render", app.tr("ui.render"), app.tr("ui.ribbon_workspace"));
         } else if folded {
             // Folded to the tab row: the workspace's name and its arrow, on one line.
-            let galley = egui::WidgetText::from(egui::RichText::new(app.tr("ui.design")).size(t.font_button).color(t.text)).into_galley(
+            let galley = egui::WidgetText::from(egui::RichText::new(workspace_name).size(t.font_button).color(t.text)).into_galley(
                 ui,
                 Some(egui::TextWrapMode::Truncate),
                 (ws.width() - 2.0 * t.space_8 - t.space_12).max(0.0),
@@ -1711,7 +1719,7 @@ fn ribbon_contents(app: &mut SolveApp, ui: &mut egui::Ui, shape: RibbonShape) ->
             ribbon_galley(ui, pos2(ws.center().x - 6.0, ws.center().y + 1.0), galley, t.text);
             dropdown_arrow(&painter, pos2(ws.center().x - 6.0 + label_width / 2.0 + 7.0, ws.center().y + 1.5), t.text_dim);
         } else {
-            let workspace_icon = if render { "ws_render" } else { "ws_design" };
+            let workspace_icon = if render { "ws_render" } else if cam { "cam" } else { "ws_design" };
             icons::paint_icon(
                 &painter,
                 Rect::from_center_size(pos2(ws.center().x, ws.top() + if labels { 39.0 } else { 25.0 }), vec2(30.0, 30.0)),
@@ -1721,7 +1729,7 @@ fn ribbon_contents(app: &mut SolveApp, ui: &mut egui::Ui, shape: RibbonShape) ->
             ribbon_text(
                 ui,
                 pos2(ws.center().x, ws.top() + if labels { 69.0 } else { 50.0 }),
-                app.tr(if render { "ui.render" } else { "ui.design" }),
+                workspace_name,
                 t.font_button,
                 t.text,
                 true,

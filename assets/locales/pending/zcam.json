@@ -2,6 +2,9 @@
   "en": {
     "ui.workspace.cam": "CAM",
     "ui.workspace.machine_simulation": "Machine Simulation",
+    "ui.workspace_cam_description": "Create coordinate systems and toolpaths for machining",
+    "ui.workspace_cam_tabs": "Toolpath",
+    "ui.workspace_machine_simulation_description": "Simulate the machine and its toolpath motion",
     "ui.tab.toolpath": "Toolpath",
     "ui.browser.coordinate_systems": "Coordinate Systems",
     "ui.cam.toolpaths": "Toolpaths",
@@ -11,6 +14,9 @@
   "ar": {
     "ui.workspace.cam": "CAM",
     "ui.workspace.machine_simulation": "محاكاة الآلة",
+    "ui.workspace_cam_description": "أنشئ أنظمة إحداثيات ومسارات أدوات للتشغيل الآلي",
+    "ui.workspace_cam_tabs": "مسار الأداة",
+    "ui.workspace_machine_simulation_description": "حاكِ الآلة وحركة مسار الأداة",
     "ui.tab.toolpath": "مسار الأداة",
     "ui.browser.coordinate_systems": "أنظمة الإحداثيات",
     "ui.cam.toolpaths": "مسارات الأدوات",
@@ -20,6 +26,9 @@
   "de": {
     "ui.workspace.cam": "CAM",
     "ui.workspace.machine_simulation": "Maschinensimulation",
+    "ui.workspace_cam_description": "Koordinatensysteme und Werkzeugwege für die Bearbeitung erstellen",
+    "ui.workspace_cam_tabs": "Werkzeugweg",
+    "ui.workspace_machine_simulation_description": "Die Maschine und ihre Werkzeugwegbewegung simulieren",
     "ui.tab.toolpath": "Werkzeugweg",
     "ui.browser.coordinate_systems": "Koordinatensysteme",
     "ui.cam.toolpaths": "Werkzeugwege",
@@ -29,6 +38,9 @@
   "he": {
     "ui.workspace.cam": "CAM",
     "ui.workspace.machine_simulation": "סימולציית מכונה",
+    "ui.workspace_cam_description": "צרו מערכות קואורדינטות ונתיבי כלים לעיבוד",
+    "ui.workspace_cam_tabs": "נתיב כלי",
+    "ui.workspace_machine_simulation_description": "סימולציה של המכונה ותנועת נתיב הכלי",
     "ui.tab.toolpath": "נתיב כלי",
     "ui.browser.coordinate_systems": "מערכות קואורדינטות",
     "ui.cam.toolpaths": "נתיבי כלים",
@@ -38,6 +50,9 @@
   "ja": {
     "ui.workspace.cam": "CAM",
     "ui.workspace.machine_simulation": "マシンシミュレーション",
+    "ui.workspace_cam_description": "加工用の座標系とツールパスを作成します",
+    "ui.workspace_cam_tabs": "ツールパス",
+    "ui.workspace_machine_simulation_description": "マシンとツールパスの動きをシミュレーションします",
     "ui.tab.toolpath": "ツールパス",
     "ui.browser.coordinate_systems": "座標系",
     "ui.cam.toolpaths": "ツールパス",
@@ -47,6 +62,9 @@
   "ko": {
     "ui.workspace.cam": "CAM",
     "ui.workspace.machine_simulation": "기계 시뮬레이션",
+    "ui.workspace_cam_description": "가공을 위한 좌표계와 공구 경로를 만듭니다",
+    "ui.workspace_cam_tabs": "공구 경로",
+    "ui.workspace_machine_simulation_description": "기계와 공구 경로의 움직임을 시뮬레이션합니다",
     "ui.tab.toolpath": "공구 경로",
     "ui.browser.coordinate_systems": "좌표계",
     "ui.cam.toolpaths": "공구 경로",
@@ -56,6 +74,9 @@
   "vi": {
     "ui.workspace.cam": "CAM",
     "ui.workspace.machine_simulation": "Mô phỏng máy",
+    "ui.workspace_cam_description": "Tạo hệ tọa độ và đường chạy dao để gia công",
+    "ui.workspace_cam_tabs": "Đường chạy dao",
+    "ui.workspace_machine_simulation_description": "Mô phỏng máy và chuyển động đường chạy dao",
     "ui.tab.toolpath": "Đường chạy dao",
     "ui.browser.coordinate_systems": "Hệ tọa độ",
     "ui.cam.toolpaths": "Đường chạy dao",
@@ -65,6 +86,9 @@
   "zh": {
     "ui.workspace.cam": "CAM",
     "ui.workspace.machine_simulation": "机床仿真",
+    "ui.workspace_cam_description": "创建用于加工的坐标系和刀轨",
+    "ui.workspace_cam_tabs": "刀轨",
+    "ui.workspace_machine_simulation_description": "仿真机床及其刀轨运动",
     "ui.tab.toolpath": "刀轨",
     "ui.browser.coordinate_systems": "坐标系",
     "ui.cam.toolpaths": "刀轨",

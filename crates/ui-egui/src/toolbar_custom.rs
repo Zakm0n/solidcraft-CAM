@@ -230,7 +230,9 @@ fn panel_lists_of(tab: &str) -> PanelLists {
         .iter()
         .filter_map(|panel| {
             let (cmds, n) = crate::workspace::layout(tab, panel, &specs)?;
-            (!cmds.is_empty() || *panel == "SELECT").then_some((*panel, cmds, n))
+            // The CAM workspace shows its empty milling groups as stubs until their commands
+            // exist, so the Toolpath tab never opens without its sections.
+            (!cmds.is_empty() || *panel == "SELECT" || tab == "TOOLPATH").then_some((*panel, cmds, n))
         })
         .collect()
 }
