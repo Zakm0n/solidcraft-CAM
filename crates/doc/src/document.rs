@@ -3222,6 +3222,9 @@ pub struct Document {
     /// Scanned points kept as a reference (Insert Point Cloud).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub point_clouds: Vec<crate::point_cloud::PointCloud>,
+    /// CAM coordinate systems: the machine zero and axes each toolpath works from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coordinate_systems: Vec<crate::cam::CoordinateSystem>,
     /// Comments of feature-input parameters (by name).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub param_comments: std::collections::BTreeMap<String, String>,
@@ -3497,6 +3500,7 @@ impl Document {
             .chain(self.timeline_groups.iter().map(|g| g.id))
             .chain(self.canvases.iter().map(|c| c.id))
             .chain(self.point_clouds.iter().map(|c| c.id))
+            .chain(self.coordinate_systems.iter().map(|c| c.id))
             .chain(a.joints.iter().map(|j| j.id))
             .chain(a.contact_sets.iter().map(|c| c.id))
             .chain(a.studies.iter().map(|s| s.id))
@@ -3547,6 +3551,7 @@ impl Document {
             favorites: Default::default(),
             canvases: Vec::new(),
             point_clouds: Vec::new(),
+            coordinate_systems: Vec::new(),
             param_comments: Default::default(),
             browser_groups: Vec::new(),
             timeline_groups: Vec::new(),

@@ -11,6 +11,7 @@ use crate::ui_kit::BackingTooltipExt as _;
 pub const DOCUMENTED: &[&str] = &[
     "appearance.assign",
     "assembly.bom",
+    "cam.coordinate_system.create",
     "canvas.decal",
     "canvas.edit",
     "canvas.insert",

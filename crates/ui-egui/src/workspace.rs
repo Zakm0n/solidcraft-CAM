@@ -404,7 +404,7 @@ pub const SECTIONS: &[Section] = &[
     Section { tab: "WELDMENTS", panel: "CONFIGURE", promoted: 2, ids: CONFIGURE },
     // The CAM workspace's Toolpath tab: its setups and coordinate systems first, then the milling
     // groups that the toolpath commands will fill.
-    Section { tab: "TOOLPATH", panel: "CREATE", promoted: 1, ids: &[] },
+    Section { tab: "TOOLPATH", panel: "CREATE", promoted: 1, ids: &["cam.coordinate_system.create"] },
     Section { tab: "TOOLPATH", panel: "2D MILLING", promoted: 1, ids: &[] },
     Section { tab: "TOOLPATH", panel: "3D MILLING", promoted: 1, ids: &[] },
 ];
@@ -466,6 +466,7 @@ const LEGACY_RENDER_SECTIONS: &[Section] = &[
 /// Compact source labels for painted big buttons only. Menus, search and tooltips
 /// retain the engine label. Route these through `tr_label`, like other UI labels.
 pub const RIBBON_LABELS: &[(&str, &str)] = &[
+    ("cam.coordinate_system.create", "Origin"),
     ("render.batch", "All Shots"),
     ("render.cancel", "Cancel"),
     ("render.export", "Export Image"),
@@ -1574,7 +1575,7 @@ mod tests {
     }
 
     #[test]
-    fn cam_workspace_shows_only_the_toolpath_tab_and_keeps_its_empty_groups() {
+    fn cam_workspace_shows_only_the_toolpath_tab_with_its_coordinate_system_and_empty_groups() {
         assert_eq!(word_cased("2D MILLING"), "2D Milling", "digits keep their case in ribbon headings");
         assert_eq!(word_cased("SHEET METAL"), "Sheet Metal");
         let mut h = crate::scenario::Harness::new();
@@ -1585,7 +1586,9 @@ mod tests {
         assert_eq!(panels("TOOLPATH"), ["CREATE", "2D MILLING", "3D MILLING"]);
         let lists = crate::toolbar_custom::panel_lists("TOOLPATH");
         assert_eq!(lists.iter().map(|(panel, ..)| *panel).collect::<Vec<_>>(), ["CREATE", "2D MILLING", "3D MILLING"]);
-        assert!(lists.iter().all(|(_, commands, _)| commands.is_empty()));
+        let create: Vec<_> = lists[0].1.iter().map(|c| c.id).collect();
+        assert_eq!(create, ["cam.coordinate_system.create"], "the Toolpath tab offers the coordinate system");
+        assert!(lists[1..].iter().all(|(_, commands, _)| commands.is_empty()), "the milling groups stay stubs");
         assert_eq!(h.call("ui.workspace", json!({"workspace":"design"}))["result"]["workspace"], "design");
         assert_eq!(h.app.ui.tab, "MODEL");
     }
