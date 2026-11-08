@@ -80,6 +80,10 @@ pub enum Target {
     Joint {
         id: u64,
     },
+    /// A Z-CAM toolpath in the CAM workspace's Toolpaths card.
+    CamToolpath {
+        id: u64,
+    },
     /// A command (toolbar button, panel drop-down row, S box row).
     ToolbarCommand {
         id: String,
@@ -432,6 +436,7 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
         Target::ViewGizmo => crate::view_gizmo::menu_items(app),
         Target::Section => crate::browser::section_items(app),
         Target::Joint { id } => joint_items(app, *id),
+        Target::CamToolpath { id } => crate::cam_browser::toolpath_items(app, *id),
         Target::ToolbarCommand { id } => crate::toolbar_custom::command_items(app, id),
         Target::Toolbar => crate::toolbar_custom::toolbar_items(app),
         Target::HistoryControls => crate::timeline::transport_items(app),
@@ -1973,6 +1978,7 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
             }
         }
         "ui.newGroup" | "ui.ungroup" | "ui.groupSelected" => crate::browser::group_action(app, &item.id, &p),
+        "ui.cam.export_gcode" => crate::dialogs_coupling::cam::export_gcode(app, id_of(&p, "toolpath")),
         // A plane's Create Sketch is the toolbar's with that plane picked first: it replaces a
         // dialog in progress, and the dialog starts the sketch at once, facing the plane.
         "sketch.create" if item.params.is_some() => {
@@ -2348,6 +2354,7 @@ pub fn check_target(app: &SolveApp, target: &Target) -> Result<(), String> {
             component(*id) && ["bodies", "sketches", "construction"].contains(&folder.as_str()) && crate::browser::scope_shows(app, scope, *id)
         }
         Target::Joint { id } => doc.assembly.joints.iter().any(|j| j.id == *id),
+        Target::CamToolpath { id } => doc.cam.toolpaths.iter().any(|p| p.id == *id),
         Target::ToolbarCommand { id } => solidcraft_engine::find_command(id).is_some(),
         Target::NamedView { name } => {
             doc.named_views.iter().any(|v| v.name == *name) || crate::browser::STANDARD_VIEWS.iter().any(|(label, _)| label == name)

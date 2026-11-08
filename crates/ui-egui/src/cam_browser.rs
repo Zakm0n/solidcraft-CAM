@@ -10,6 +10,7 @@
 use egui::{Rect, Sense, pos2, vec2};
 use solidcraft_engine::doc::cam::{Toolpath, ToolpathKind};
 
+use crate::context_menu::{Item, Target};
 use crate::theme::Tokens;
 use crate::ui_kit::{Container, DockEdges, Surface};
 use crate::SolveApp;
@@ -62,9 +63,9 @@ fn header(ui: &mut egui::Ui) {
 /// The setups and, below each, the toolpaths it runs. A toolpath whose setup is the model origin
 /// (or a setup the design no longer has) sits under a "Model origin" row. Until the design has
 /// any of them the card says so in its own scrollable body.
-fn body(app: &SolveApp, ui: &mut egui::Ui) {
+fn body(app: &mut SolveApp, ui: &mut egui::Ui) {
     let t = Tokens::get();
-    let cam = &app.session.doc.cam;
+    let cam = app.session.doc.cam.clone();
     if cam.setups.is_empty() && cam.toolpaths.is_empty() {
         empty_state(ui);
         return;
@@ -109,8 +110,9 @@ fn group_row(ui: &mut egui::Ui, name: &str, count: usize, target: &str) {
     crate::scenario::publish_rect(target, response.rect);
 }
 
-/// One toolpath under its setup: its name, and the operation and tool it cuts with.
-fn toolpath_row(app: &SolveApp, ui: &mut egui::Ui, toolpath: &Toolpath) {
+/// One toolpath under its setup: its name, and the operation and tool it cuts with. A right-click
+/// opens its menu, where its G-code program can be exported.
+fn toolpath_row(app: &mut SolveApp, ui: &mut egui::Ui, toolpath: &Toolpath) {
     let t = Tokens::get();
     let kind = match toolpath.kind {
         ToolpathKind::Facing => crate::i18n::tr_label("Facing"),
@@ -128,8 +130,28 @@ fn toolpath_row(app: &SolveApp, ui: &mut egui::Ui, toolpath: &Toolpath) {
                 ui.label(egui::RichText::new(secondary).size(t.font_small).color(t.text_dim));
             });
         })
-        .response;
-    crate::scenario::publish_rect(&format!("cam:toolpaths:toolpath:{}", toolpath.id), response.rect);
+        .response
+        .interact(Sense::click());
+    let target = format!("cam:toolpaths:toolpath:{}", toolpath.id);
+    crate::scenario::publish_rect(&target, response.rect);
+    crate::scenario::publish_handle(&target, response.rect.center());
+    if response.secondary_clicked()
+        && let Some(at) = response.interact_pointer_pos()
+    {
+        crate::context_menu::open_for(app, at, Target::CamToolpath { id: toolpath.id });
+    }
+}
+
+/// One toolpath's menu: exporting it as a G-code program, once it has a feed rate the machine
+/// can run at.
+pub fn toolpath_items(app: &SolveApp, id: u64) -> Vec<Item> {
+    let Some(toolpath) = app.session.doc.cam.toolpaths.iter().find(|p| p.id == id) else { return Vec::new() };
+    let ready = toolpath.feed_rate > 0.0;
+    vec![
+        Item::action("ui.cam.export_gcode", "Export G-code…", "export")
+            .with(serde_json::json!({ "toolpath": id }))
+            .off_because((!ready).then(|| "Set a feed rate before exporting".to_string())),
+    ]
 }
 
 /// What the card holds until a setup exists: a dim line that says so, in its own scrollable body

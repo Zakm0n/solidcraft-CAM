@@ -407,6 +407,7 @@ pub const SECTIONS: &[Section] = &[
     Section { tab: "TOOLPATH", panel: "CREATE", promoted: 1, ids: &["cam.coordinate_system.create", "cam.setup.create", "cam.tool.list"] },
     Section { tab: "TOOLPATH", panel: "2D MILLING", promoted: 1, ids: &["cam.toolpath.contour", "cam.toolpath.pocket"] },
     Section { tab: "TOOLPATH", panel: "3D MILLING", promoted: 1, ids: &[] },
+    Section { tab: "TOOLPATH", panel: "OUTPUT", promoted: 1, ids: &["cam.export.gcode"] },
 ];
 
 // Migration data only: Render commands remain registered, but have no live ribbon sections.
@@ -469,6 +470,7 @@ pub const RIBBON_LABELS: &[(&str, &str)] = &[
     ("cam.coordinate_system.create", "Origin"),
     ("cam.setup.create", "Setup"),
     ("cam.tool.list", "Tools"),
+    ("cam.export.gcode", "G-code"),
     ("render.batch", "All Shots"),
     ("render.cancel", "Cancel"),
     ("render.export", "Export Image"),
@@ -1585,14 +1587,16 @@ mod tests {
         h.frames(2);
         assert_eq!(current(&h.app), Workspace::Cam);
         assert_eq!(visible_tabs(&h.app), CAM_TABS);
-        assert_eq!(panels("TOOLPATH"), ["CREATE", "2D MILLING", "3D MILLING"]);
+        assert_eq!(panels("TOOLPATH"), ["CREATE", "2D MILLING", "3D MILLING", "OUTPUT"]);
         let lists = crate::toolbar_custom::panel_lists("TOOLPATH");
-        assert_eq!(lists.iter().map(|(panel, ..)| *panel).collect::<Vec<_>>(), ["CREATE", "2D MILLING", "3D MILLING"]);
+        assert_eq!(lists.iter().map(|(panel, ..)| *panel).collect::<Vec<_>>(), ["CREATE", "2D MILLING", "3D MILLING", "OUTPUT"]);
         let create: Vec<_> = lists[0].1.iter().map(|c| c.id).collect();
         assert_eq!(create, ["cam.coordinate_system.create", "cam.setup.create", "cam.tool.list"], "the Toolpath tab offers the origin, the setup and the tool library");
         let milling: Vec<_> = lists[1].1.iter().map(|c| c.id).collect();
         assert_eq!(milling, ["cam.toolpath.contour", "cam.toolpath.pocket"], "2D Milling offers the contour and pocket operations");
-        assert!(lists[2..].iter().all(|(_, commands, _)| commands.is_empty()), "3D Milling stays a stub");
+        assert!(lists[2].1.is_empty(), "3D Milling stays a stub");
+        let output: Vec<_> = lists[3].1.iter().map(|c| c.id).collect();
+        assert_eq!(output, ["cam.export.gcode"], "Output offers the G-code export");
         assert_eq!(h.call("ui.workspace", json!({"workspace":"design"}))["result"]["workspace"], "design");
         assert_eq!(h.app.ui.tab, "MODEL");
     }

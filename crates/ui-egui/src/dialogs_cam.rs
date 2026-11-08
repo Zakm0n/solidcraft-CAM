@@ -672,6 +672,41 @@ fn toolpath_commands(app: &SolveApp, f: &DialogCamToolpath, command: &str) -> Re
     Ok(vec![(command.to_string(), p)])
 }
 
+/// Start the CAM workspace's G-code export (`cam.export.gcode`) from the ribbon: ask where to
+/// save the program, then write it. With no toolpath there is nothing to name, so the command
+/// reports its own error without opening a picker.
+pub fn start_export(app: &mut SolveApp, id: &str) -> bool {
+    if id != "cam.export.gcode" {
+        return false;
+    }
+    if app.session.doc.cam.toolpaths.is_empty() {
+        if let Err(why) = app.run(id, json!({})) {
+            app.set_status(why, true);
+        }
+    } else {
+        export_gcode(app, None);
+    }
+    true
+}
+
+/// Ask where to save the G-code program and write it there. `toolpath` limits the program to
+/// that one operation; none exports every toolpath of the design.
+pub fn export_gcode(app: &mut SolveApp, toolpath: Option<u64>) {
+    let design = app.session.doc.name.trim();
+    let name = if design.is_empty() { "program.nc".to_string() } else { format!("{design}.nc") };
+    app.pick_save(&name, &["nc", "gcode", "tap"], move |app, path| {
+        let Some(path) = path else { return };
+        let params = match toolpath {
+            Some(id) => json!({ "path": path, "toolpaths": [id] }),
+            None => json!({ "path": path }),
+        };
+        match app.run("cam.export.gcode", params) {
+            Ok(_) => app.set_status(format!("Exported {path}"), false),
+            Err(why) => app.set_status(why, true),
+        }
+    });
+}
+
 #[cfg(test)]
 #[path = "dialogs_cam_tests.rs"]
 mod tests;

@@ -12,6 +12,7 @@ pub const DOCUMENTED: &[&str] = &[
     "appearance.assign",
     "assembly.bom",
     "cam.coordinate_system.create",
+    "cam.export.gcode",
     "canvas.decal",
     "canvas.edit",
     "canvas.insert",

@@ -1,3 +1,6 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use serde_json::json;
 use solidcore_record::Vec3;
 use solidcraft_engine::Session;
@@ -193,6 +196,62 @@ fn the_pocket_dialog_names_the_model_origin_without_a_setup() {
     assert_eq!(cmds[0].1["stepover"], 2.5);
     assert_eq!(cmds[0].1["total_depth"], 10.0);
     assert_eq!(cmds[0].1["stock_to_leave"], 0.2);
+}
+
+/// The Output button asks where to save the program, then writes the G-code there; with no
+/// toolpath it says so without opening a picker.
+#[test]
+fn the_output_button_asks_where_to_save_and_writes_the_gcode() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    app.run("solid.box", json!({"length": 40, "width": 20, "height": 10, "body_name": "Plate"})).unwrap();
+    let tool = app.run("cam.tool.create", json!({"diameter": 6})).unwrap()["tool"]["id"].as_u64().unwrap();
+    app.run("cam.toolpath.contour", json!({"tool": tool, "total_depth": 10, "feed_rate": 800, "spindle_speed": 12000})).unwrap();
+    let path = std::env::temp_dir().join(format!("zcam-ui-{}.nc", std::process::id()));
+    let chosen = path.to_string_lossy().into_owned();
+    let asked = Rc::new(Cell::new(0));
+    let count = asked.clone();
+    let answer = chosen.clone();
+    app.services.pick_save = Some(Box::new(move |name, extensions| {
+        assert!(name.ends_with(".nc"), "{name}");
+        assert!(extensions.contains(&"nc"), "{extensions:?}");
+        count.set(count.get() + 1);
+        Box::pin(std::future::ready(Some(answer.clone())))
+    }));
+    app.start("cam.export.gcode");
+    crate::file_picker::tick(&mut app, &crate::fonts::test_context());
+    assert_eq!(asked.get(), 1, "the command asks where to save");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("%\n") && text.contains("G21") && text.contains("M30"), "{text}");
+    assert!(app.status.as_ref().is_some_and(|(text, _, error)| text.starts_with("Exported ") && !error), "{:?}", app.status);
+    let _ = std::fs::remove_file(&path);
+
+    // A design without toolpaths reports why instead of asking for a file.
+    let mut empty = SolveApp::new(Session::default(), Services::default());
+    let asked = Rc::new(Cell::new(0));
+    let count = asked.clone();
+    empty.services.pick_save = Some(Box::new(move |_, _| {
+        count.set(count.get() + 1);
+        Box::pin(std::future::ready(None))
+    }));
+    empty.start("cam.export.gcode");
+    assert_eq!(asked.get(), 0, "nothing to name, so no picker");
+    assert!(empty.status.as_ref().is_some_and(|(_, _, error)| *error), "{:?}", empty.status);
+}
+
+/// A toolpath's menu offers its G-code export once it has a feed rate.
+#[test]
+fn a_toolpaths_menu_exports_its_gcode() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    app.run("solid.box", json!({"length": 40, "width": 20, "height": 10, "body_name": "Plate"})).unwrap();
+    let tool = app.run("cam.tool.create", json!({"diameter": 6})).unwrap()["tool"]["id"].as_u64().unwrap();
+    let id = app.run("cam.toolpath.contour", json!({"tool": tool, "total_depth": 10})).unwrap()["toolpath"]["id"].as_u64().unwrap();
+    let items = crate::cam_browser::toolpath_items(&app, id);
+    let export = items.iter().find(|item| item.id == "ui.cam.export_gcode").expect("the menu exports the program");
+    assert!(!export.enabled, "a toolpath without a feed rate cannot be exported: {:?}", export.tip);
+    let _ = app.run("cam.export.gcode", json!({}));
+    app.run("cam.toolpath.contour", json!({"tool": tool, "total_depth": 10, "feed_rate": 500})).unwrap();
+    let ready = app.session.doc.cam.toolpaths.last().unwrap().id;
+    assert!(crate::cam_browser::toolpath_items(&app, ready).iter().any(|item| item.id == "ui.cam.export_gcode" && item.enabled));
 }
 
 /// The Tool Library opens on a new tool, creates it, and opens again on that tool to edit it.

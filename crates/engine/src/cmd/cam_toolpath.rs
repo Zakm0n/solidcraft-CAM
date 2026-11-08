@@ -69,19 +69,19 @@ fn pocket(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// The frame a setup works in: the machine zero and its X, Y and Z directions in model space.
-struct Frame {
-    origin: Vec3,
-    x: Vec3,
-    y: Vec3,
-    z: Vec3,
+pub(crate) struct Frame {
+    pub(crate) origin: Vec3,
+    pub(crate) x: Vec3,
+    pub(crate) y: Vec3,
+    pub(crate) z: Vec3,
 }
 
 /// One machined body's exact section: its extent along the setup's Z and its outline loops.
-struct Section {
-    body: String,
-    lo: f64,
-    hi: f64,
-    loops: Vec<Loop2>,
+pub(crate) struct Section {
+    pub(crate) body: String,
+    pub(crate) lo: f64,
+    pub(crate) hi: f64,
+    pub(crate) loops: Vec<Loop2>,
 }
 
 fn create(s: &mut Session, p: &Value, cmd: &str, kind: ToolpathKind) -> Result<Value> {
@@ -99,25 +99,7 @@ fn create(s: &mut Session, p: &Value, cmd: &str, kind: ToolpathKind) -> Result<V
         return Err(bad(cmd, "the setup's coordinate system is not right-handed: X cross Y must point along Z"));
     }
     let names = bodies(s, p, setup.as_ref(), cmd)?;
-    let mut sections = Vec::with_capacity(names.len());
-    {
-        let state = s.world_state()?;
-        for name in &names {
-            let found = state.bodies.iter().find(|b| b.name == *name).ok_or_else(|| bad(cmd, format!("unknown body name `{name}`")))?;
-            let section = certified_prism_section(&found.body, &plane)
-                .map_err(|e| bad(cmd, format!("cannot read the exact geometry of body `{name}`: {e}")))?;
-            let Some(section) = section else {
-                return Err(bad(
-                    cmd,
-                    format!(
-                        "body `{name}` is not a uniform prism along the setup's Z axis: contour and pocket cut a constant cross-section (2.5D machining)"
-                    ),
-                ));
-            };
-            let loops = section.region.loops().cloned().collect();
-            sections.push(Section { body: name.clone(), lo: section.lo, hi: section.hi, loops });
-        }
-    }
+    let sections = sections(s, &plane, &names, cmd)?;
     let (total_depth, stock_top) = depths(p, setup.as_ref(), &sections, cmd)?;
     let cut = stock_top - total_depth;
     for section in &sections {
@@ -173,6 +155,27 @@ fn create(s: &mut Session, p: &Value, cmd: &str, kind: ToolpathKind) -> Result<V
         .map_err(|e| bad(cmd, e.to_string()))
 }
 
+/// The exact section of each named body down the setup's Z. Contour and pocket cut a constant
+/// cross-section, so a body that is not a uniform prism is refused.
+pub(crate) fn sections(s: &Session, plane: &Plane, names: &[String], cmd: &str) -> Result<Vec<Section>> {
+    let state = s.world_state()?;
+    let mut sections = Vec::with_capacity(names.len());
+    for name in names {
+        let found = state.bodies.iter().find(|b| b.name == *name).ok_or_else(|| bad(cmd, format!("unknown body name `{name}`")))?;
+        let section = certified_prism_section(&found.body, plane)
+            .map_err(|e| bad(cmd, format!("cannot read the exact geometry of body `{name}`: {e}")))?;
+        let Some(section) = section else {
+            return Err(bad(
+                cmd,
+                format!("body `{name}` is not a uniform prism along the setup's Z axis: contour and pocket cut a constant cross-section (2.5D machining)"),
+            ));
+        };
+        let loops = section.region.loops().cloned().collect();
+        sections.push(Section { body: name.clone(), lo: section.lo, hi: section.hi, loops });
+    }
+    Ok(sections)
+}
+
 /// The tool the call cuts with: a tool of this design.
 fn tool(s: &Session, p: &Value, cmd: &str) -> Result<Tool> {
     let id = p.get("tool").and_then(Value::as_u64).ok_or_else(|| bad(cmd, "`tool` must be a tool's id in this design"))?;
@@ -180,7 +183,7 @@ fn tool(s: &Session, p: &Value, cmd: &str) -> Result<Tool> {
 }
 
 /// The setup the call runs in; `None` is the model origin and the model's own axes.
-fn setup(s: &Session, p: &Value, cmd: &str) -> Result<Option<Setup>> {
+pub(crate) fn setup(s: &Session, p: &Value, cmd: &str) -> Result<Option<Setup>> {
     match p.get("setup") {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Number(n)) => match n.as_u64() {
@@ -193,7 +196,7 @@ fn setup(s: &Session, p: &Value, cmd: &str) -> Result<Option<Setup>> {
 }
 
 /// The machine zero and axes of `setup`, or the model origin and its own axes.
-fn frame(s: &Session, setup: Option<&Setup>, cmd: &str) -> Result<Frame> {
+pub(crate) fn frame(s: &Session, setup: Option<&Setup>, cmd: &str) -> Result<Frame> {
     let coordinate_system = setup.map(|x| x.coordinate_system).unwrap_or(0);
     if coordinate_system == 0 {
         return Ok(Frame { origin: Vec3::ZERO, x: Vec3::X, y: Vec3::Y, z: Vec3::Z });
@@ -240,8 +243,8 @@ fn bodies(s: &Session, p: &Value, setup: Option<&Setup>, cmd: &str) -> Result<Ve
     Ok(names)
 }
 
-/// The total depth below the stock top, and the stock's top and bottom along the setup's Z.
-fn depths(p: &Value, setup: Option<&Setup>, sections: &[Section], cmd: &str) -> Result<(f64, f64)> {
+/// The stock's top and bottom along the setup's Z.
+pub(crate) fn stock_bounds(setup: Option<&Setup>, sections: &[Section], cmd: &str) -> Result<(f64, f64)> {
     let Some(lo) = sections.iter().map(|s| s.lo).reduce(f64::min) else {
         return Err(bad(cmd, "there is nothing to machine: the design has no solid body"));
     };
@@ -254,6 +257,15 @@ fn depths(p: &Value, setup: Option<&Setup>, sections: &[Section], cmd: &str) -> 
     if !(stock_top.is_finite() && stock_bottom.is_finite() && stock_top > stock_bottom) {
         return Err(bad(cmd, "the stock has no height"));
     }
+    Ok((stock_top, stock_bottom))
+}
+
+/// The total depth below the stock top, and the stock's top and bottom along the setup's Z.
+fn depths(p: &Value, setup: Option<&Setup>, sections: &[Section], cmd: &str) -> Result<(f64, f64)> {
+    let (stock_top, stock_bottom) = stock_bounds(setup, sections, cmd)?;
+    let Some(lo) = sections.iter().map(|s| s.lo).reduce(f64::min) else {
+        return Err(bad(cmd, "there is nothing to machine: the design has no solid body"));
+    };
     let total_depth = match depth_param(p, "total_depth", cmd)? {
         Some(depth) => depth,
         None => stock_top - lo,
@@ -295,13 +307,13 @@ fn stock_to_leave(p: &Value, cmd: &str) -> Result<Option<f64>> {
 }
 
 /// How many passes cut `total_depth` at `depth_per_pass` each; the last pass takes the rest.
-fn passes(total_depth: f64, depth_per_pass: f64) -> usize {
+pub(crate) fn passes(total_depth: f64, depth_per_pass: f64) -> usize {
     let exact = (total_depth / depth_per_pass - 1e-9).ceil();
     if exact.is_finite() && exact >= 1.0 { exact as usize } else { 1 }
 }
 
 /// The height of each pass above the machine zero, deepest last.
-fn pass_levels(stock_top: f64, total_depth: f64, depth_per_pass: f64, passes: usize) -> Vec<f64> {
+pub(crate) fn pass_levels(stock_top: f64, total_depth: f64, depth_per_pass: f64, passes: usize) -> Vec<f64> {
     (1..=passes).map(|pass| stock_top - (depth_per_pass * pass as f64).min(total_depth)).collect()
 }
 
@@ -326,7 +338,7 @@ fn boundaries(sections: &[Section], cmd: &str) -> Result<Vec<BoundaryLoop>> {
 }
 
 /// A loop's points, in order, without the repeated closing point.
-fn loop_points(lp: &Loop2, cmd: &str) -> Result<Vec<[f64; 2]>> {
+pub(crate) fn loop_points(lp: &Loop2, cmd: &str) -> Result<Vec<[f64; 2]>> {
     let mut points: Vec<Vec2> = Vec::new();
     for seg in &lp.segs {
         for point in seg.polyline(BOUNDARY_TOL) {
