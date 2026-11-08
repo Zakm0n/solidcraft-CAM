@@ -208,6 +208,10 @@ pub enum Zcam {
     Setup(DialogCamSetup),
     /// The design's tool library: pick a tool to edit, or fill in a new one (`cam.tool.list`).
     ToolLibrary(DialogCamToolLibrary),
+    /// Follow a part's outline with the side of the cutter (`cam.toolpath.contour`).
+    Contour(DialogCamContour),
+    /// Clear the material inside a part's outline (`cam.toolpath.pocket`).
+    Pocket(DialogCamPocket),
 }
 
 impl Zcam {
@@ -216,6 +220,8 @@ impl Zcam {
         match self {
             Zcam::Setup(_) => "cam.setup.create",
             Zcam::ToolLibrary(_) => "cam.tool.list",
+            Zcam::Contour(_) => "cam.toolpath.contour",
+            Zcam::Pocket(_) => "cam.toolpath.pocket",
         }
     }
 
@@ -224,6 +230,8 @@ impl Zcam {
         match self {
             Zcam::Setup(_) => "SETUP",
             Zcam::ToolLibrary(_) => "TOOL LIBRARY",
+            Zcam::Contour(_) => "CONTOUR",
+            Zcam::Pocket(_) => "POCKET",
         }
     }
 }
@@ -366,11 +374,102 @@ impl DialogCamToolLibrary {
     }
 }
 
+/// The cutting values a contour or pocket operation runs at, and the setup and tool it uses.
+///
+/// A field left empty is not sent: the command then takes its own default (a stepover of half
+/// the tool's diameter, a total depth through the machined bodies, no stated rate).
+#[derive(Clone, Debug)]
+pub struct DialogCamToolpath {
+    /// Empty: the command names it "Contour" or "Pocket" and the first free number.
+    pub name: String,
+    /// Index into the setup choices: 0 is the model origin, n is `doc.cam.setups[n - 1]`.
+    pub setup: usize,
+    /// Index into the design's tools, as `cam.tool.list` reports them.
+    pub tool: usize,
+    pub feed_rate: String,
+    pub plunge_rate: String,
+    pub spindle_speed: String,
+    pub stepover: String,
+    pub depth_per_pass: String,
+    pub total_depth: String,
+    pub stock_to_leave: String,
+}
+
+impl DialogCamToolpath {
+    fn new(app: &SolveApp) -> Self {
+        DialogCamToolpath {
+            name: String::new(),
+            // A design with setups cuts in its first one; without, in the model origin.
+            setup: usize::from(!app.session.doc.cam.setups.is_empty()),
+            tool: 0,
+            feed_rate: String::new(),
+            plunge_rate: String::new(),
+            spindle_speed: String::new(),
+            stepover: String::new(),
+            depth_per_pass: String::new(),
+            total_depth: String::new(),
+            stock_to_leave: String::new(),
+        }
+    }
+}
+
+/// Contour: follow the part's outline with the side of the cutter (`cam.toolpath.contour`).
+#[derive(Clone, Debug)]
+pub struct DialogCamContour {
+    pub form: DialogCamToolpath,
+}
+
+impl DialogCamContour {
+    fn new(app: &SolveApp) -> Self {
+        DialogCamContour { form: DialogCamToolpath::new(app) }
+    }
+}
+
+impl std::ops::Deref for DialogCamContour {
+    type Target = DialogCamToolpath;
+    fn deref(&self) -> &Self::Target {
+        &self.form
+    }
+}
+
+impl std::ops::DerefMut for DialogCamContour {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.form
+    }
+}
+
+/// Pocket: clear the material inside the part's outline (`cam.toolpath.pocket`).
+#[derive(Clone, Debug)]
+pub struct DialogCamPocket {
+    pub form: DialogCamToolpath,
+}
+
+impl DialogCamPocket {
+    fn new(app: &SolveApp) -> Self {
+        DialogCamPocket { form: DialogCamToolpath::new(app) }
+    }
+}
+
+impl std::ops::Deref for DialogCamPocket {
+    type Target = DialogCamToolpath;
+    fn deref(&self) -> &Self::Target {
+        &self.form
+    }
+}
+
+impl std::ops::DerefMut for DialogCamPocket {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.form
+    }
+}
+
 /// Start the CAM workspace dialog `id` opens; none for another command.
 pub fn start_workspace(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
     match id {
         "cam.setup.create" => Some((Kind::Cam(Zcam::Setup(DialogCamSetup::new(app))), vec![SelInput::new("Bodies", BODIES, true)])),
         "cam.tool.list" => Some((Kind::Cam(Zcam::ToolLibrary(DialogCamToolLibrary::new(app))), Vec::new())),
+        "cam.toolpath.contour" => Some((Kind::Cam(Zcam::Contour(DialogCamContour::new(app))), Vec::new())),
+        "cam.toolpath.pocket" => Some((Kind::Cam(Zcam::Pocket(DialogCamPocket::new(app))), Vec::new())),
         _ => None,
     }
 }
@@ -380,6 +479,8 @@ pub fn zcam_rows(app: &mut SolveApp, ui: &mut egui::Ui, form: &mut Zcam) -> bool
     match form {
         Zcam::Setup(f) => setup_rows(app, ui, f),
         Zcam::ToolLibrary(f) => tool_rows(app, ui, f),
+        Zcam::Contour(f) => toolpath_rows(app, ui, &mut f.form),
+        Zcam::Pocket(f) => toolpath_rows(app, ui, &mut f.form),
     }
 }
 
@@ -421,11 +522,40 @@ fn tool_rows(app: &mut SolveApp, ui: &mut egui::Ui, f: &mut DialogCamToolLibrary
     enter
 }
 
+/// A contour or pocket form: its name, setup, tool and cutting values.
+fn toolpath_rows(app: &mut SolveApp, ui: &mut egui::Ui, f: &mut DialogCamToolpath) -> bool {
+    let tools = cam_tools(app);
+    if tools.is_empty() {
+        crate::ui_kit::status_line(ui, "Create a tool in the Tool Library first", crate::ui_kit::StatusTone::Dim);
+        return false;
+    }
+    let mut enter = crate::ui_kit::text_row(ui, "Name", &mut f.name, "").0;
+    // The model origin first, then each setup of the design.
+    let mut setups: Vec<&str> = Vec::with_capacity(app.session.doc.cam.setups.len() + 1);
+    setups.push(crate::i18n::tr_label("Model origin"));
+    setups.extend(app.session.doc.cam.setups.iter().map(|s| s.name.as_str()));
+    f.setup = f.setup.min(setups.len() - 1);
+    crate::ui_kit::choice_row(ui, "Setup", "cam_toolpath_setup", &mut f.setup, &setups);
+    let choices: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    f.tool = f.tool.min(choices.len() - 1);
+    crate::ui_kit::choice_row(ui, crate::i18n::tr("ui.cam.select_tool"), "cam_toolpath_tool", &mut f.tool, &choices);
+    enter |= crate::ui_kit::expr_row(ui, "Feed rate", &mut f.feed_rate);
+    enter |= crate::ui_kit::expr_row(ui, "Plunge rate", &mut f.plunge_rate);
+    enter |= crate::ui_kit::expr_row(ui, "Spindle speed", &mut f.spindle_speed);
+    enter |= crate::ui_kit::expr_row(ui, crate::i18n::tr("ui.cam.stepover"), &mut f.stepover);
+    enter |= crate::ui_kit::expr_row(ui, crate::i18n::tr("ui.cam.depth_per_pass"), &mut f.depth_per_pass);
+    enter |= crate::ui_kit::expr_row(ui, "Total depth", &mut f.total_depth);
+    enter |= crate::ui_kit::expr_row(ui, "Stock to leave", &mut f.stock_to_leave);
+    enter
+}
+
 /// The commands OK runs for a CAM workspace dialog.
 pub fn zcam_commands(app: &SolveApp, form: &Zcam, inputs: &[SelInput]) -> Result<Vec<(String, Value)>, String> {
     match form {
         Zcam::Setup(f) => setup_commands(app, f, inputs),
         Zcam::ToolLibrary(f) => tool_commands(app, f),
+        Zcam::Contour(f) => toolpath_commands(app, &f.form, "cam.toolpath.contour"),
+        Zcam::Pocket(f) => toolpath_commands(app, &f.form, "cam.toolpath.pocket"),
     }
 }
 
@@ -502,6 +632,43 @@ fn tool_commands(app: &SolveApp, f: &DialogCamToolLibrary) -> Result<Vec<(String
         }
         None => "cam.tool.create",
     };
+    Ok(vec![(command.to_string(), p)])
+}
+
+/// A contour or pocket form's command: the setup and tool it names, and every cutting value it
+/// states. An empty field is left out, so the command takes its own default.
+fn toolpath_commands(app: &SolveApp, f: &DialogCamToolpath, command: &str) -> Result<Vec<(String, Value)>, String> {
+    let s = &app.session;
+    let tool = s.doc.cam.tools.get(f.tool).ok_or_else(|| "choose a tool (the design's Tool Library is empty)".to_string())?;
+    let mut p = json!({ "tool": tool.id });
+    if let Some(setup) = f.setup.checked_sub(1).and_then(|i| s.doc.cam.setups.get(i)) {
+        p["setup"] = json!(setup.id);
+    }
+    let name = f.name.trim();
+    if !name.is_empty() {
+        p["name"] = json!(name);
+    }
+    let optional = |label: &str, text: &str, kind: solidcraft_engine::doc::expr::Kind| -> Result<Option<f64>, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        crate::length_input::eval(&s.doc, text, kind).map(Some).map_err(|e| format!("{}: {e}", crate::i18n::tr_label(label)))
+    };
+    use solidcraft_engine::doc::expr::Kind;
+    for (key, label, text, kind) in [
+        ("feed_rate", "Feed rate", f.feed_rate.as_str(), Kind::Unitless),
+        ("plunge_rate", "Plunge rate", f.plunge_rate.as_str(), Kind::Unitless),
+        ("spindle_speed", "Spindle speed", f.spindle_speed.as_str(), Kind::Unitless),
+        ("stepover", "Stepover", f.stepover.as_str(), Kind::Length),
+        ("depth_per_pass", "Depth per pass", f.depth_per_pass.as_str(), Kind::Length),
+        ("total_depth", "Total depth", f.total_depth.as_str(), Kind::Length),
+        ("stock_to_leave", "Stock to leave", f.stock_to_leave.as_str(), Kind::Length),
+    ] {
+        if let Some(value) = optional(label, text, kind)? {
+            p[key] = json!(value);
+        }
+    }
     Ok(vec![(command.to_string(), p)])
 }
 

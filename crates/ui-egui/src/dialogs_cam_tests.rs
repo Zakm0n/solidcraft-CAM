@@ -140,6 +140,61 @@ fn the_setup_dialog_creates_a_setup() {
     assert_eq!(app.session.doc.cam.setups[0].name, "Roughing");
 }
 
+/// The Toolpath tab's Contour dialog builds `cam.toolpath.contour` from its setup, tool and
+/// cutting values; a field left empty is not sent, so the command keeps its default.
+#[test]
+fn the_contour_dialog_builds_the_operation() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    app.run("cam.tool.create", json!({"name": "6 flat", "diameter": 6.0})).unwrap();
+    app.run("cam.setup.create", json!({"name": "Roughing"})).unwrap();
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.toolpath.contour").expect("the Contour command opens a dialog");
+    if let Kind::Cam(Zcam::Contour(f)) = &mut d.kind {
+        // The design's only setup is chosen, so the operation cuts in it.
+        assert_eq!((f.setup, f.tool), (1, 0));
+        f.name = "Outline".into();
+        f.feed_rate = "500".into();
+        f.spindle_speed = "12000".into();
+        f.stepover = "3 mm".into();
+        f.depth_per_pass = "2 mm".into();
+    } else {
+        panic!("cam.toolpath.contour has the wrong dialog");
+    }
+    let cmds = apply_commands(&app, &d).unwrap();
+    assert_eq!(cmds[0].0, "cam.toolpath.contour");
+    assert_eq!(cmds[0].1["name"], "Outline");
+    assert_eq!(cmds[0].1["tool"], app.session.doc.cam.tools[0].id);
+    assert_eq!(cmds[0].1["setup"], app.session.doc.cam.setups[0].id);
+    assert_eq!(cmds[0].1["feed_rate"], 500.0);
+    assert_eq!(cmds[0].1["spindle_speed"], 12000.0);
+    assert_eq!(cmds[0].1["stepover"], 3.0);
+    assert_eq!(cmds[0].1["depth_per_pass"], 2.0);
+    assert!(cmds[0].1.get("total_depth").is_none(), "an empty field takes the command's default: {}", cmds[0].1);
+    assert!(cmds[0].1.get("stock_to_leave").is_none(), "{}", cmds[0].1);
+}
+
+/// The Pocket dialog sends `cam.toolpath.pocket`, and without setups it names the model origin
+/// (setup 0 is left out, as the command defaults to it).
+#[test]
+fn the_pocket_dialog_names_the_model_origin_without_a_setup() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    app.run("cam.tool.create", json!({"name": "3 flat", "diameter": 3.0})).unwrap();
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.toolpath.pocket").expect("the Pocket command opens a dialog");
+    if let Kind::Cam(Zcam::Pocket(f)) = &mut d.kind {
+        assert_eq!(f.setup, 0, "without setups the operation cuts from the model origin");
+        f.stepover = "2.5 mm".into();
+        f.total_depth = "10 mm".into();
+        f.stock_to_leave = "0.2 mm".into();
+    } else {
+        panic!("cam.toolpath.pocket has the wrong dialog");
+    }
+    let cmds = apply_commands(&app, &d).unwrap();
+    assert_eq!(cmds[0].0, "cam.toolpath.pocket");
+    assert!(cmds[0].1.get("setup").is_none(), "{}", cmds[0].1);
+    assert_eq!(cmds[0].1["stepover"], 2.5);
+    assert_eq!(cmds[0].1["total_depth"], 10.0);
+    assert_eq!(cmds[0].1["stock_to_leave"], 0.2);
+}
+
 /// The Tool Library opens on a new tool, creates it, and opens again on that tool to edit it.
 #[test]
 fn the_tool_library_dialog_creates_and_edits_tools() {

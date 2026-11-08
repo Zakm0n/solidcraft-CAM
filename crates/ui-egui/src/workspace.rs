@@ -402,10 +402,10 @@ pub const SECTIONS: &[Section] = &[
     Section { tab: "WELDMENTS", panel: "SKETCH", promoted: 1, ids: &["sketch.create"] },
     Section { tab: "WELDMENTS", panel: "CREATE", promoted: 1, ids: &["frame.member"] },
     Section { tab: "WELDMENTS", panel: "CONFIGURE", promoted: 2, ids: CONFIGURE },
-    // The CAM workspace's Toolpath tab: its setups and coordinate systems first, then the milling
-    // groups that the toolpath commands will fill.
+    // The CAM workspace's Toolpath tab: its setups and coordinate systems first, then the 2.5D
+    // milling operations the setups and tools feed.
     Section { tab: "TOOLPATH", panel: "CREATE", promoted: 1, ids: &["cam.coordinate_system.create", "cam.setup.create", "cam.tool.list"] },
-    Section { tab: "TOOLPATH", panel: "2D MILLING", promoted: 1, ids: &[] },
+    Section { tab: "TOOLPATH", panel: "2D MILLING", promoted: 1, ids: &["cam.toolpath.contour", "cam.toolpath.pocket"] },
     Section { tab: "TOOLPATH", panel: "3D MILLING", promoted: 1, ids: &[] },
 ];
 
@@ -1577,7 +1577,7 @@ mod tests {
     }
 
     #[test]
-    fn cam_workspace_shows_only_the_toolpath_tab_with_its_coordinate_system_and_empty_groups() {
+    fn cam_workspace_shows_its_toolpath_tab_with_setup_and_milling_groups() {
         assert_eq!(word_cased("2D MILLING"), "2D Milling", "digits keep their case in ribbon headings");
         assert_eq!(word_cased("SHEET METAL"), "Sheet Metal");
         let mut h = crate::scenario::Harness::new();
@@ -1590,7 +1590,9 @@ mod tests {
         assert_eq!(lists.iter().map(|(panel, ..)| *panel).collect::<Vec<_>>(), ["CREATE", "2D MILLING", "3D MILLING"]);
         let create: Vec<_> = lists[0].1.iter().map(|c| c.id).collect();
         assert_eq!(create, ["cam.coordinate_system.create", "cam.setup.create", "cam.tool.list"], "the Toolpath tab offers the origin, the setup and the tool library");
-        assert!(lists[1..].iter().all(|(_, commands, _)| commands.is_empty()), "the milling groups stay stubs");
+        let milling: Vec<_> = lists[1].1.iter().map(|c| c.id).collect();
+        assert_eq!(milling, ["cam.toolpath.contour", "cam.toolpath.pocket"], "2D Milling offers the contour and pocket operations");
+        assert!(lists[2..].iter().all(|(_, commands, _)| commands.is_empty()), "3D Milling stays a stub");
         assert_eq!(h.call("ui.workspace", json!({"workspace":"design"}))["result"]["workspace"], "design");
         assert_eq!(h.app.ui.tab, "MODEL");
     }

@@ -41,6 +41,8 @@ const DEPTH_TOL: f64 = 1e-6;
 
 pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.toolpath.contour", "Contour", crate::checked!("cam.toolpath.contour", contour))
+        .at("TOOLPATH", "2D MILLING")
+        .icon("cam")
         .doc_only()
         .contract(&CONTRACT)
         .output(output_schema_for::<ToolpathReply>)
@@ -48,6 +50,8 @@ pub static COMMANDS: &[CommandSpec] = &[
             "tool: a tool's id in this design; setup?: a setup's id (default 0: the model origin and axes, with the stock read from the machined bodies); bodies?: [body names] (default: the setup's bodies, else every solid body); name?: 1–128 characters (default: \"Contour\" and the first free number); feed_rate?, plunge_rate?: mm per minute; spindle_speed?: rpm (each default 0: not stated); stepover?: mm (default half the tool's diameter); depth_per_pass?: mm (default: the whole total depth, one pass); total_depth?: mm (default: through the machined bodies); stock_to_leave?: mm (default 0)",
         ),
     CommandSpec::new("cam.toolpath.pocket", "Pocket", crate::checked!("cam.toolpath.pocket", pocket))
+        .at("TOOLPATH", "2D MILLING")
+        .icon("cam")
         .doc_only()
         .contract(&CONTRACT)
         .output(output_schema_for::<ToolpathReply>)

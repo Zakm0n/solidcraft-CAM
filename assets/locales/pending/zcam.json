@@ -15,7 +15,16 @@
     "cmd.cam.toolpath.contour": "Contour",
     "cmd.cam.toolpath.pocket": "Pocket",
     "help.cam.coordinate_system.create": "Creates a programmable machining origin and XYZ orientation.\n\nUse this to define where the machine zero is located on the stock.",
-    "ui.cam.toolpaths.empty": "No toolpaths yet"
+    "ui.cam.toolpaths.empty": "No toolpaths yet",
+    "ui.cam.select_tool": "Select tool",
+    "ui.cam.stepover": "Stepover",
+    "ui.cam.depth_per_pass": "Depth per pass",
+    "Feed rate": "Feed rate",
+    "Plunge rate": "Plunge rate",
+    "Spindle speed": "Spindle speed",
+    "Total depth": "Total depth",
+    "Stock to leave": "Stock to leave",
+    "Create a tool in the Tool Library first": "Create a tool in the Tool Library first"
   },
   "ar": {
     "ui.workspace.cam": "CAM",

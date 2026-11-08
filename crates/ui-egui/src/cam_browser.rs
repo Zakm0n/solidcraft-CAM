@@ -1,10 +1,14 @@
-//! The CAM workspace's Toolpaths card: the lower half of the left column, which will list the
-//! toolpath setups a coordinate system and its operations make (`ui.cam.toolpaths`).
+//! The CAM workspace's Toolpaths card: the lower half of the left column, which lists the
+//! machining setups a coordinate system and its operations make (`ui.cam.toolpaths`), each with
+//! the toolpaths that run in it below the setup's row.
 //!
 //! The card is a workspace surface like the Browser above it, so it uses the shared container
-//! and theme tokens and draws nothing while the space is too small to hold a header.
+//! and theme tokens and draws nothing while the space is too small to hold a header. The rows
+//! are read from the design itself: a toolpath names its setup, so it is never listed under
+//! another one.
 
 use egui::{Rect, Sense, pos2, vec2};
+use solidcraft_engine::doc::cam::{Toolpath, ToolpathKind};
 
 use crate::theme::Tokens;
 use crate::ui_kit::{Container, DockEdges, Surface};
@@ -14,10 +18,12 @@ use crate::SolveApp;
 const CARD_INSET: f32 = 4.0;
 /// The header band's height, matching the Browser card's heading.
 const HEADER_H: f32 = 26.0;
+/// How far a toolpath row is set in from the setup that owns it.
+const CHILD_INDENT: f32 = 14.0;
 
 /// Draw the Toolpaths card in `bounds`, the Browser column's lower half, and return where it
 /// was drawn. No card is drawn when the space cannot hold one.
-pub(crate) fn toolpaths_panel(_app: &mut SolveApp, ui: &mut egui::Ui, bounds: Rect) -> Option<Rect> {
+pub(crate) fn toolpaths_panel(app: &mut SolveApp, ui: &mut egui::Ui, bounds: Rect) -> Option<Rect> {
     let t = Tokens::get();
     if !bounds.is_finite() || bounds.width() < t.control_height || bounds.height() < t.form_header_height {
         return None;
@@ -33,7 +39,7 @@ pub(crate) fn toolpaths_panel(_app: &mut SolveApp, ui: &mut egui::Ui, bounds: Re
                 ui.set_max_size(inner);
                 ui.set_clip_rect(ui.clip_rect().intersect(Rect::from_min_size(ui.max_rect().min, inner)));
                 header(ui);
-                empty_state(ui);
+                body(app, ui);
             })
         },
     );
@@ -53,8 +59,81 @@ fn header(ui: &mut egui::Ui) {
     ui.painter().galley(pos2(rect.left() + t.space_6, rect.center().y - galley.size().y / 2.0), galley, t.text);
 }
 
-/// What the card holds until toolpath setups exist: a dim line that says so, in its own
-/// scrollable body so a later list slots in without moving the header.
+/// The setups and, below each, the toolpaths it runs. A toolpath whose setup is the model origin
+/// (or a setup the design no longer has) sits under a "Model origin" row. Until the design has
+/// any of them the card says so in its own scrollable body.
+fn body(app: &SolveApp, ui: &mut egui::Ui) {
+    let t = Tokens::get();
+    let cam = &app.session.doc.cam;
+    if cam.setups.is_empty() && cam.toolpaths.is_empty() {
+        empty_state(ui);
+        return;
+    }
+    egui::ScrollArea::vertical()
+        .id_salt("sc_cam_toolpaths_body")
+        .min_scrolled_height(0.0)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.add_space(t.space_4);
+            for setup in &cam.setups {
+                let target = format!("cam:toolpaths:setup:{}", setup.id);
+                group_row(ui, &setup.name, cam.toolpaths_in(setup.id).count(), &target);
+                for toolpath in cam.toolpaths_in(setup.id) {
+                    toolpath_row(app, ui, toolpath);
+                }
+            }
+            let unassigned: Vec<&Toolpath> = cam.toolpaths.iter().filter(|p| cam.setup(p.setup).is_none()).collect();
+            if !unassigned.is_empty() {
+                group_row(ui, crate::i18n::tr_label("Model origin"), unassigned.len(), "cam:toolpaths:setup:0");
+                for toolpath in unassigned {
+                    toolpath_row(app, ui, toolpath);
+                }
+            }
+            ui.add_space(t.space_4);
+        });
+}
+
+/// A setup's own row: its name in the Browser's group style, and how many toolpaths it holds.
+fn group_row(ui: &mut egui::Ui, name: &str, count: usize, target: &str) {
+    let t = Tokens::get();
+    let response = ui
+        .horizontal(|ui| {
+            ui.add_space(t.space_4);
+            ui.label(egui::RichText::new(crate::i18n::tr_name(name)).font(crate::fonts::semibold(t.font_body)).color(t.text));
+            if count > 0 {
+                ui.label(egui::RichText::new(count.to_string()).size(t.font_small).color(t.text_dim));
+            }
+        })
+        .response;
+    crate::scenario::publish_rect(target, response.rect);
+}
+
+/// One toolpath under its setup: its name, and the operation and tool it cuts with.
+fn toolpath_row(app: &SolveApp, ui: &mut egui::Ui, toolpath: &Toolpath) {
+    let t = Tokens::get();
+    let kind = match toolpath.kind {
+        ToolpathKind::Facing => crate::i18n::tr_label("Facing"),
+        ToolpathKind::Contour => crate::i18n::tr_label("Contour"),
+        ToolpathKind::Pocket => crate::i18n::tr_label("Pocket"),
+    };
+    let tool = app.session.doc.cam.tool(toolpath.tool).map(|tool| tool.name.as_str()).unwrap_or("");
+    let secondary = if tool.is_empty() { kind.to_string() } else { format!("{kind} · {tool}") };
+    let response = ui
+        .horizontal(|ui| {
+            ui.add_space(t.space_4 + CHILD_INDENT);
+            ui.label(egui::RichText::new(crate::i18n::tr_name(&toolpath.name)).size(t.font_body).color(t.text));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(t.space_4);
+                ui.label(egui::RichText::new(secondary).size(t.font_small).color(t.text_dim));
+            });
+        })
+        .response;
+    crate::scenario::publish_rect(&format!("cam:toolpaths:toolpath:{}", toolpath.id), response.rect);
+}
+
+/// What the card holds until a setup exists: a dim line that says so, in its own scrollable body
+/// so a later list slots in without moving the header.
 fn empty_state(ui: &mut egui::Ui) {
     let t = Tokens::get();
     egui::ScrollArea::vertical()
