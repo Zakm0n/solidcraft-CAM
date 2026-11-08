@@ -62,6 +62,7 @@ mod dimension_create_ui_tests;
 pub mod documents;
 pub mod drag_extrude;
 pub mod drag_snap;
+pub mod dynamic_gnomon;
 pub mod easyprint_ui;
 pub mod edit_clipboard;
 pub mod edit_in_place;

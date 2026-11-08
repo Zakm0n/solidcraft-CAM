@@ -1,0 +1,600 @@
+//! The dynamic gnomon: a local coordinate frame the user places in the 3D view, with an origin
+//! ball, one translation arrow per axis and one rotation ring per axis. The arms keep a constant
+//! size on screen, as the Move triad's do, so the frame stays usable at every zoom; the frame
+//! itself is kept square, so the three arms always name an orthogonal machining frame.
+//!
+//! The widget owns only its own state: it draws over the viewport, hit-tests its handles against
+//! the projected geometry and reports a drag's [`Change`]. The caller decides what the change
+//! means (the CAM coordinate system dialog writes it into the frame's values), and picks B-rep
+//! geometry for an alignment mode outside this module.
+
+use egui::{Color32, Painter, Pos2, Shape, Stroke};
+use solidcore_record::Vec3;
+use solidcraft_engine::geom::UnitVec3;
+use solidcraft_engine::geom::prelude::*;
+
+use crate::theme::Tokens;
+use crate::viewport::Proj;
+
+/// The arm length on screen, in points.
+pub const ARM_PX: f32 = 96.0;
+/// The rotation rings' radius as a share of the arm.
+const RING_SHARE: f64 = 0.62;
+/// The origin ball's radius, in points.
+const ORIGIN_RADIUS: f32 = 6.0;
+/// How near the origin ball a press still takes it, in points.
+const ORIGIN_HIT: f32 = 10.0;
+/// How near an arm a press still takes it, in points.
+const AXIS_HIT: f32 = 6.0;
+/// How near a rotation ring a press still takes it, in points.
+const RING_HIT: f32 = 5.0;
+/// Points one rotation ring is drawn (and hit-tested) with.
+const RING_POINTS: usize = 64;
+/// Where an arm starts, as a share of its length, so it leaves the origin ball clear.
+const ARM_START: f64 = 0.18;
+
+/// One of the frame's three axes, in the order the colours name them: X red, Y green, Z blue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Axis {
+    X,
+    Y,
+    Z,
+}
+
+impl Axis {
+    /// The three axes, in X, Y, Z order.
+    pub const ALL: [Axis; 3] = [Axis::X, Axis::Y, Axis::Z];
+
+    /// Its place in [`Axis::ALL`], and in [`Tokens::axes`].
+    pub const fn index(self) -> usize {
+        match self {
+            Axis::X => 0,
+            Axis::Y => 1,
+            Axis::Z => 2,
+        }
+    }
+}
+
+/// The part of the gnomon a press can take.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GnomonHandle {
+    /// No handle.
+    #[default]
+    None,
+    /// The origin ball: a free drag in the view plane.
+    Origin,
+    /// An arm: a drag along that axis.
+    Translate(Axis),
+    /// A rotation ring: a drag turning the frame about that axis.
+    Rotate(Axis),
+}
+
+/// What a geometry pick aligns the frame to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GnomonAlignMode {
+    /// The frame is moved by its own handles only.
+    #[default]
+    Free,
+    /// A pick puts the origin on the picked point.
+    SnapOrigin,
+    /// A picked face (or plane) gives the frame its Z: the face's normal.
+    AlignZFace,
+    /// A picked edge gives the frame its X: the edge's direction.
+    AlignXEdge,
+}
+
+impl GnomonAlignMode {
+    /// The modes, in the order a mode row offers them.
+    pub const ALL: [GnomonAlignMode; 4] =
+        [GnomonAlignMode::Free, GnomonAlignMode::SnapOrigin, GnomonAlignMode::AlignZFace, GnomonAlignMode::AlignXEdge];
+}
+
+/// The frame change one frame of a drag made.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Change {
+    /// The origin moved by this offset, in mm.
+    Translate(Vec3),
+    /// The frame turned about one of its axes by this angle, in radians.
+    Rotate { axis: Axis, angle: f64 },
+}
+
+/// The primary pointer's state, so [`DynamicGnomon::interact`] can be driven without an
+/// [`egui::Ui`] (and checked without one): the caller reads it once per frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct InputState {
+    /// Where the pointer is, in screen points.
+    pub pointer: Option<Pos2>,
+    /// The primary button went down this frame.
+    pub primary_pressed: bool,
+    /// The primary button is down.
+    pub primary_down: bool,
+    /// The primary button came up this frame.
+    pub primary_released: bool,
+}
+
+impl InputState {
+    /// This frame's pointer state from `ui`.
+    pub fn read(ui: &egui::Ui) -> InputState {
+        let (pointer, primary_pressed, primary_down, primary_released) =
+            ui.input(|i| (i.pointer.interact_pos(), i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.primary_released()));
+        InputState { pointer, primary_pressed, primary_down, primary_released }
+    }
+}
+
+/// What a drag began on, in the frame the drag started from.
+#[derive(Clone, Copy, Debug)]
+enum Grab {
+    /// The view-plane point under the press (the origin ball).
+    Point(Vec3),
+    /// The parameter along the arm under the press.
+    Along(f64),
+    /// The angle on the rotation ring under the press.
+    Angle(f64),
+}
+
+/// A drag in progress. The frame it started from is kept, so every frame's change is measured
+/// from the same place and rounding cannot accumulate over a long drag.
+#[derive(Clone, Copy, Debug)]
+struct DragState {
+    handle: GnomonHandle,
+    origin: Vec3,
+    x_axis: UnitVec3,
+    z_axis: UnitVec3,
+    grab: Grab,
+    /// The view direction through the origin when the drag began: the plane the origin ball is
+    /// dragged on, so a perspective camera's per-pixel rays cannot make the ball drift.
+    view: Vec3,
+}
+
+impl DragState {
+    /// The direction of `axis` in the frame the drag started from.
+    fn axis(&self, axis: Axis) -> Vec3 {
+        match axis {
+            Axis::X => self.x_axis.vec(),
+            Axis::Y => self.z_axis.vec().cross(self.x_axis.vec()).normalized().unwrap_or(Vec3::Y),
+            Axis::Z => self.z_axis.vec(),
+        }
+    }
+
+    /// What the press took, in this frame.
+    fn grab(&self, proj: &Proj, pos: Pos2) -> Option<Grab> {
+        match self.handle {
+            GnomonHandle::Origin => Some(Grab::Point(crate::gizmo::on_plane(proj, pos, self.origin, self.view)?)),
+            GnomonHandle::Translate(axis) => Some(Grab::Along(crate::canvas::along(proj, pos, self.origin, self.axis(axis))?)),
+            GnomonHandle::Rotate(axis) => {
+                let direction = self.axis(axis);
+                let at = crate::gizmo::on_plane(proj, pos, self.origin, direction)?;
+                let (e1, e2) = ring_basis(axis);
+                let dart = at - self.origin;
+                Some(Grab::Angle(dart.dot(e2).atan2(dart.dot(e1))))
+            }
+            GnomonHandle::None => None,
+        }
+    }
+}
+
+/// The gnomon's screen geometry: where the origin ball sits and where each handle runs.
+struct Shapes {
+    origin: Pos2,
+    arrows: Vec<(Axis, Pos2, Pos2)>,
+    rings: Vec<(Axis, Vec<Pos2>)>,
+}
+
+/// A frame the user places: where its origin is, the directions of its X and Z, and which handle
+/// the pointer is over or dragging. Y is always Z × X, so the three are square by construction.
+#[derive(Clone, Debug)]
+pub struct DynamicGnomon {
+    origin: Vec3,
+    x_axis: UnitVec3,
+    z_axis: UnitVec3,
+    active_handle: GnomonHandle,
+    hovered_handle: GnomonHandle,
+    align_mode: GnomonAlignMode,
+    drag: Option<DragState>,
+}
+
+impl Default for DynamicGnomon {
+    fn default() -> Self {
+        DynamicGnomon {
+            origin: Vec3::ZERO,
+            x_axis: UnitVec3::X,
+            z_axis: UnitVec3::Z,
+            active_handle: GnomonHandle::None,
+            hovered_handle: GnomonHandle::None,
+            align_mode: GnomonAlignMode::Free,
+            drag: None,
+        }
+    }
+}
+
+impl DynamicGnomon {
+    /// A frame at `origin` with `x_axis` and `z_axis`. X is made square to Z, and a vector with no
+    /// usable direction (zero, or not a finite number) is refused with `None`.
+    pub fn new(origin: Vec3, x_axis: Vec3, z_axis: Vec3) -> Option<DynamicGnomon> {
+        if !finite(origin) || !finite(x_axis) || !finite(z_axis) {
+            return None;
+        }
+        let z_axis = UnitVec3::new(z_axis)?;
+        Some(DynamicGnomon { origin, x_axis: square_to(x_axis, z_axis), z_axis, ..DynamicGnomon::default() })
+    }
+
+    /// Where the frame's zero sits, in model space (mm).
+    pub fn origin(&self) -> Vec3 {
+        self.origin
+    }
+
+    /// The frame's +X direction.
+    pub fn x_axis(&self) -> UnitVec3 {
+        self.x_axis
+    }
+
+    /// The frame's +Y direction: Z × X, always square to both.
+    pub fn y_axis(&self) -> UnitVec3 {
+        self.z_axis.vec().cross(self.x_axis.vec()).normalized().and_then(UnitVec3::new).unwrap_or(UnitVec3::Y)
+    }
+
+    /// The frame's +Z direction.
+    pub fn z_axis(&self) -> UnitVec3 {
+        self.z_axis
+    }
+
+    /// The frame's +X, +Y and +Z directions, unit vectors in that order.
+    pub fn axes(&self) -> [Vec3; 3] {
+        [self.x_axis.vec(), self.y_axis().vec(), self.z_axis.vec()]
+    }
+
+    /// What a geometry pick aligns the frame to.
+    pub fn align_mode(&self) -> GnomonAlignMode {
+        self.align_mode
+    }
+
+    /// Set what a geometry pick aligns the frame to.
+    pub fn set_align_mode(&mut self, mode: GnomonAlignMode) {
+        self.align_mode = mode;
+    }
+
+    /// The handle being dragged, if any.
+    pub fn active_handle(&self) -> GnomonHandle {
+        self.active_handle
+    }
+
+    /// The handle under the pointer, from the last [`DynamicGnomon::interact`].
+    pub fn hovered_handle(&self) -> GnomonHandle {
+        self.hovered_handle
+    }
+
+    /// Whether a drag is in progress.
+    pub fn is_dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// Put the origin at `p`. A point that is not a finite number is refused.
+    pub fn set_origin(&mut self, p: Vec3) -> bool {
+        if !finite(p) {
+            return false;
+        }
+        self.origin = p;
+        true
+    }
+
+    /// Point the frame's Z along `z`, keeping X as nearly as it was while square to the new Z.
+    pub fn set_z_axis(&mut self, z: Vec3) -> bool {
+        let Some(z) = UnitVec3::new(z) else { return false };
+        self.x_axis = square_to(self.x_axis.vec(), z);
+        self.z_axis = z;
+        true
+    }
+
+    /// Point the frame's X along `x`, keeping Z as nearly as it was while square to the new X.
+    pub fn set_x_axis(&mut self, x: Vec3) -> bool {
+        let Some(x) = UnitVec3::new(x) else { return false };
+        self.z_axis = square_to(self.z_axis.vec(), x);
+        self.x_axis = x;
+        true
+    }
+
+    /// Move the origin by `delta`.
+    pub fn translate(&mut self, delta: Vec3) -> bool {
+        if !finite(delta) {
+            return false;
+        }
+        self.set_origin(self.origin + delta)
+    }
+
+    /// Turn the frame about one of its own axes by `angle` radians.
+    pub fn rotate(&mut self, axis: Axis, angle: f64) -> bool {
+        if !angle.is_finite() {
+            return false;
+        }
+        let direction = match axis {
+            Axis::X => self.x_axis.vec(),
+            Axis::Y => self.y_axis().vec(),
+            Axis::Z => self.z_axis.vec(),
+        };
+        let x = rotate_about(self.x_axis.vec(), direction, angle);
+        let z = rotate_about(self.z_axis.vec(), direction, angle);
+        self.set_frame(x, z)
+    }
+
+    /// Whether `p` is over one of the handles, so a press there belongs to the gnomon rather
+    /// than to the camera (the Move triad's [`crate::gizmo::contains_pointer`]).
+    pub fn contains_pointer(&self, proj: &Proj, p: Pos2) -> bool {
+        self.shapes(proj).is_some_and(|shapes| hit(&shapes, p) != GnomonHandle::None)
+    }
+
+    /// Draw the frame over the view. The hovered or dragged handle is drawn in the accent colour
+    /// and thicker, so it reads as the one a press would take.
+    pub fn draw(&self, painter: &Painter, proj: &Proj, theme: &Tokens) {
+        let Some(shapes) = self.shapes(proj) else { return };
+        let colour = |handle: GnomonHandle, axis: Axis| {
+            if self.lit(handle) { theme.accent } else { theme.axes()[axis.index()] }
+        };
+        // Rings behind the arms, the origin ball in front of both: the part a press takes first
+        // is drawn last, as a press takes the ball before an arm and an arm before a ring.
+        for (axis, points) in &shapes.rings {
+            let handle = GnomonHandle::Rotate(*axis);
+            painter.add(Shape::line(points.clone(), Stroke::new(if self.lit(handle) { 3.0 } else { 1.4 }, colour(handle, *axis))));
+        }
+        for (axis, from, to) in &shapes.arrows {
+            let handle = GnomonHandle::Translate(*axis);
+            arrow(painter, *from, *to, colour(handle, *axis), self.lit(handle));
+        }
+        let origin_handle = GnomonHandle::Origin;
+        let origin_colour = if self.lit(origin_handle) { theme.accent } else { theme.text };
+        painter.circle(shapes.origin, ORIGIN_RADIUS, theme.panel, Stroke::new(1.5, origin_colour));
+        publish_handles(&shapes);
+    }
+
+    /// Follow this frame's drag, or begin one when the press landed on a handle. Every frame a
+    /// drag changes the frame, the change is applied here and returned for the caller's values.
+    pub fn interact(&mut self, proj: &Proj, input: &InputState) -> Option<Change> {
+        if self.drag.is_some() {
+            let change = input.pointer.filter(|p| finite_screen(*p)).and_then(|p| self.apply(proj, p));
+            if input.primary_released || !input.primary_down {
+                self.drag = None;
+                self.active_handle = GnomonHandle::None;
+                self.hovered_handle = GnomonHandle::None;
+            }
+            return change;
+        }
+        let pointer = input.pointer.filter(|p| finite_screen(*p) && proj.rect.contains(*p));
+        self.hovered_handle = pointer.map_or(GnomonHandle::None, |p| self.hit(proj, p));
+        if input.primary_pressed
+            && let Some(p) = pointer
+        {
+            let handle = self.hit(proj, p);
+            if handle != GnomonHandle::None {
+                self.begin(proj, p, handle);
+            }
+        }
+        None
+    }
+
+    /// Whether `handle` is the hovered or dragged one.
+    fn lit(&self, handle: GnomonHandle) -> bool {
+        self.hovered_handle == handle || self.active_handle == handle
+    }
+
+    /// Take the handle under `pos` and remember the frame it started from. Nothing moves until
+    /// the pointer does.
+    fn begin(&mut self, proj: &Proj, pos: Pos2, handle: GnomonHandle) {
+        let started = DragState {
+            handle,
+            origin: self.origin,
+            x_axis: self.x_axis,
+            z_axis: self.z_axis,
+            grab: Grab::Point(Vec3::ZERO),
+            view: view_dir(proj, self.origin),
+        };
+        let Some(grab) = started.grab(proj, pos) else { return };
+        self.active_handle = handle;
+        self.drag = Some(DragState { grab, ..started });
+    }
+
+    /// Apply the drag as far as `pos` takes it, measured from where it started.
+    fn apply(&mut self, proj: &Proj, pos: Pos2) -> Option<Change> {
+        let drag = self.drag?;
+        match drag.handle {
+            GnomonHandle::Origin => {
+                let Grab::Point(grab) = drag.grab else { return None };
+                let at = crate::gizmo::on_plane(proj, pos, drag.origin, drag.view)?;
+                let delta = at - grab;
+                if !finite(delta) {
+                    return None;
+                }
+                self.origin = drag.origin + delta;
+                Some(Change::Translate(delta))
+            }
+            GnomonHandle::Translate(axis) => {
+                let Grab::Along(t0) = drag.grab else { return None };
+                let direction = drag.axis(axis);
+                let t = crate::canvas::along(proj, pos, drag.origin, direction)?;
+                let delta = direction * (t - t0);
+                if !finite(delta) {
+                    return None;
+                }
+                self.origin = drag.origin + delta;
+                Some(Change::Translate(delta))
+            }
+            GnomonHandle::Rotate(axis) => {
+                let Grab::Angle(angle0) = drag.grab else { return None };
+                let direction = drag.axis(axis);
+                let at = crate::gizmo::on_plane(proj, pos, drag.origin, direction)?;
+                let (e1, e2) = ring_basis(axis);
+                let dart = at - drag.origin;
+                let angle = wrap(dart.dot(e2).atan2(dart.dot(e1)) - angle0);
+                if !angle.is_finite() {
+                    return None;
+                }
+                self.set_frame(rotate_about(drag.x_axis.vec(), direction, angle), rotate_about(drag.z_axis.vec(), direction, angle));
+                Some(Change::Rotate { axis, angle })
+            }
+            GnomonHandle::None => None,
+        }
+    }
+
+    /// The handle under `pos`, in the order a press takes them: origin ball, arm, ring.
+    fn hit(&self, proj: &Proj, pos: Pos2) -> GnomonHandle {
+        self.shapes(proj).map_or(GnomonHandle::None, |shapes| hit(&shapes, pos))
+    }
+
+    /// Where the frame's handles are on screen. `None` when the origin or a usable scale is
+    /// behind the camera.
+    fn shapes(&self, proj: &Proj) -> Option<Shapes> {
+        let origin = proj.to_screen(self.origin)?;
+        let len = mm_per_px(proj, self.origin)? * f64::from(ARM_PX);
+        if !len.is_finite() || len <= 0.0 {
+            return None;
+        }
+        let mut arrows = Vec::with_capacity(3);
+        let mut rings = Vec::with_capacity(3);
+        for axis in Axis::ALL {
+            let direction = match axis {
+                Axis::X => self.x_axis.vec(),
+                Axis::Y => self.y_axis().vec(),
+                Axis::Z => self.z_axis.vec(),
+            };
+            if let (Some(from), Some(to)) =
+                (proj.to_screen(self.origin + direction * (ARM_START * len)), proj.to_screen(self.origin + direction * len))
+            {
+                arrows.push((axis, from, to));
+            }
+            let (e1, e2) = ring_basis(axis);
+            let points: Vec<Pos2> = (0..=RING_POINTS)
+                .filter_map(|i| {
+                    let angle = std::f64::consts::TAU * i as f64 / RING_POINTS as f64;
+                    proj.to_screen(self.origin + (e1 * angle.cos() + e2 * angle.sin()) * (RING_SHARE * len))
+                })
+                .collect();
+            if points.len() > 2 {
+                rings.push((axis, points));
+            }
+        }
+        Some(Shapes { origin, arrows, rings })
+    }
+
+    /// Replace the frame with `x` and `z` made square, unless either has no usable direction.
+    fn set_frame(&mut self, x: Vec3, z: Vec3) -> bool {
+        let Some(z) = UnitVec3::new(z) else { return false };
+        let x = square_to(x, z);
+        self.x_axis = x;
+        self.z_axis = z;
+        true
+    }
+}
+
+/// `v` made unit length and square to the unit vector `z`. A `v` parallel to `z` has no direction
+/// left: any square direction will do, so the frame keeps a usable third axis.
+fn square_to(v: Vec3, z: UnitVec3) -> UnitVec3 {
+    let square = v - *z * v.dot(*z);
+    square.unit().or_else(|| z.any_perp().unit()).unwrap_or(UnitVec3::X)
+}
+
+/// The in-plane directions of the ring about `axis`, right-handed: `e1 × e2 = axis`.
+fn ring_basis(axis: Axis) -> (Vec3, Vec3) {
+    match axis {
+        Axis::X => (Vec3::Y, Vec3::Z),
+        Axis::Y => (Vec3::Z, Vec3::X),
+        Axis::Z => (Vec3::X, Vec3::Y),
+    }
+}
+
+/// `v` turned by `angle` radians about the unit vector `direction` (Rodrigues).
+fn rotate_about(v: Vec3, direction: Vec3, angle: f64) -> Vec3 {
+    let (sin, cos) = angle.sin_cos();
+    v * cos + direction.cross(v) * sin + direction * (direction.dot(v) * (1.0 - cos))
+}
+
+/// An angle in (−π, π].
+fn wrap(angle: f64) -> f64 {
+    let mut a = angle % std::f64::consts::TAU;
+    if a > std::f64::consts::PI {
+        a -= std::f64::consts::TAU;
+    } else if a <= -std::f64::consts::PI {
+        a += std::f64::consts::TAU;
+    }
+    a
+}
+
+/// The view direction through `at`, or through the view's centre when `at` is behind the camera.
+fn view_dir(proj: &Proj, at: Vec3) -> Vec3 {
+    let c = proj.to_screen(at).unwrap_or_else(|| proj.rect.center());
+    let direction = proj.ray(c).1;
+    if finite(direction) { direction } else { Vec3::new(0.0, 0.0, -1.0) }
+}
+
+/// Millimetres per screen point at `at`.
+fn mm_per_px(proj: &Proj, at: Vec3) -> Option<f64> {
+    let c = proj.to_screen(at)?;
+    let u = proj.ray(c).1.any_perp().normalized()?;
+    let pixels = f64::from(c.distance(proj.to_screen(at + u)?));
+    (pixels.is_finite() && pixels > 1e-8).then(|| 1.0 / pixels)
+}
+
+/// Distance from `p` to the screen segment `a`–`b`.
+fn seg_dist(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let t = ((p - a).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+    (a + ab * t).distance(p)
+}
+
+/// The handle nearest `p`, in the order a press takes them.
+fn hit(shapes: &Shapes, p: Pos2) -> GnomonHandle {
+    if shapes.origin.distance(p) <= ORIGIN_HIT {
+        return GnomonHandle::Origin;
+    }
+    if let Some((axis, _, _)) = shapes.arrows.iter().find(|(_, from, to)| seg_dist(p, *from, *to) <= AXIS_HIT) {
+        return GnomonHandle::Translate(*axis);
+    }
+    shapes
+        .rings
+        .iter()
+        .find(|(_, points)| points.windows(2).any(|w| seg_dist(p, w[0], w[1]) <= RING_HIT))
+        .map_or(GnomonHandle::None, |(axis, _)| GnomonHandle::Rotate(*axis))
+}
+
+/// Draw one arm: its line and an arrowhead at `to`.
+fn arrow(painter: &Painter, from: Pos2, to: Pos2, colour: Color32, hot: bool) {
+    let v = to - from;
+    let len = v.length();
+    if len < 1.0 {
+        return;
+    }
+    let u = v / len;
+    let n = egui::vec2(-u.y, u.x);
+    painter.line_segment([from, to], Stroke::new(if hot { 3.0 } else { 2.0 }, colour));
+    let head = 12.0f32.min(len * 0.5);
+    painter.add(Shape::convex_polygon(vec![to + u * 2.0, to - u * head + n * head * 0.4, to - u * head - n * head * 0.4], colour, Stroke::NONE));
+}
+
+/// Publish the handles for scenarios and checks, every frame they show.
+fn publish_handles(shapes: &Shapes) {
+    crate::scenario::publish_handle("dynamic_gnomon:origin", shapes.origin);
+    for (axis, _, to) in &shapes.arrows {
+        crate::scenario::publish_handle(&format!("dynamic_gnomon:{}", axis_name(*axis)), *to);
+    }
+    for (axis, points) in &shapes.rings {
+        if let Some(at) = points.first() {
+            crate::scenario::publish_handle(&format!("dynamic_gnomon:r{}", axis_name(*axis)), *at);
+        }
+    }
+}
+
+/// The axis's name, as a published handle names it.
+fn axis_name(axis: Axis) -> &'static str {
+    match axis {
+        Axis::X => "x",
+        Axis::Y => "y",
+        Axis::Z => "z",
+    }
+}
+
+/// Whether every part of `v` is a finite number.
+fn finite(v: Vec3) -> bool {
+    v.x.is_finite() && v.y.is_finite() && v.z.is_finite()
+}
+
+/// Whether a screen point is a finite number.
+fn finite_screen(p: Pos2) -> bool {
+    p.x.is_finite() && p.y.is_finite()
+}
