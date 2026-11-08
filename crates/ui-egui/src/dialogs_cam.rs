@@ -5,19 +5,24 @@
 //! turns on. Play turns the cam a full turn so the follower shows its motion before OK.
 
 use crate::ui_kit::BackingTooltipExt as _;
-use egui::RichText;
+use egui::{Painter, Pos2, RichText};
 use serde_json::{Value, json};
+use solidcore_record::Vec3;
 use solidcraft_engine::Sel;
 use solidcraft_engine::Session;
 use solidcraft_engine::doc::joints::JointKind;
+use solidcraft_engine::geom::prelude::*;
+use solidcraft_engine::kernel::FaceSurface;
 
 use super::{ROUND, joint_row, occurrence, pick, picked_radius, trim, turn};
 use crate::SolveApp;
 use crate::dialogs::Kind;
-use crate::dialogs::{combo, field, form_row};
+use crate::dialogs::{Dialog, combo, field, form_row};
 use crate::dialogs_assembly::Asm;
+use crate::dynamic_gnomon::{DynamicGnomon, GnomonAlignMode, InputState};
 use crate::selection::{BODIES, EDGES, FACES, PROFILES, SelInput, SelectionExt as _, VERTICES};
 use crate::theme::Tokens;
+use crate::viewport::Proj;
 
 /// The follower types, as `joint.cam` takes them, and their labels.
 const FOLLOWERS: [&str; 3] = ["knife", "roller", "flat"];
@@ -206,6 +211,9 @@ pub fn animate(s: &Session, f: &CamForm, cmds: &mut Vec<(String, Value)>) {
 pub enum Zcam {
     /// A machining setup: its coordinate system, stock and bodies (`cam.setup.create`).
     Setup(DialogCamSetup),
+    /// A machining origin and axes placed in the view, aligned to a face or an edge
+    /// (`cam.coordinate_system.create`).
+    CoordinateSystem(DialogCamCoordinateSystem),
     /// The design's tool library: pick a tool to edit, or fill in a new one (`cam.tool.list`).
     ToolLibrary(DialogCamToolLibrary),
     /// Follow a part's outline with the side of the cutter (`cam.toolpath.contour`).
@@ -219,6 +227,7 @@ impl Zcam {
     pub fn command(&self) -> &'static str {
         match self {
             Zcam::Setup(_) => "cam.setup.create",
+            Zcam::CoordinateSystem(_) => "cam.coordinate_system.create",
             Zcam::ToolLibrary(_) => "cam.tool.list",
             Zcam::Contour(_) => "cam.toolpath.contour",
             Zcam::Pocket(_) => "cam.toolpath.pocket",
@@ -229,6 +238,7 @@ impl Zcam {
     pub fn title(&self) -> &'static str {
         match self {
             Zcam::Setup(_) => "SETUP",
+            Zcam::CoordinateSystem(_) => "COORDINATE SYSTEM",
             Zcam::ToolLibrary(_) => "TOOL LIBRARY",
             Zcam::Contour(_) => "CONTOUR",
             Zcam::Pocket(_) => "POCKET",
@@ -272,6 +282,193 @@ impl DialogCamSetup {
             offset_z: zero(),
         }
     }
+}
+
+/// The alignment modes' labels, in [`GnomonAlignMode::ALL`] order.
+const ALIGN_LABELS: [&str; 4] = ["label.align_free", "label.snap_origin", "label.align_z_to_face", "label.align_x_edge"];
+
+/// A machining origin being placed (`cam.coordinate_system.create`): a dynamic gnomon the user
+/// drags and aligns to B-rep geometry in the view, and its origin typed exactly.
+#[derive(Clone, Debug)]
+pub struct DialogCamCoordinateSystem {
+    /// The frame the view draws and drags: its origin, +X and +Z (Y is Z × X).
+    pub gnomon: DynamicGnomon,
+    /// The machining setup this frame is made for, when the dialog was opened from one.
+    pub target_setup: Option<u64>,
+    /// Empty: the command names it "Coordinate System" and the first free number.
+    pub name: String,
+    /// The origin's X, Y and Z, as typed.
+    pub origin_x: String,
+    pub origin_y: String,
+    pub origin_z: String,
+    /// The frame moved in the view (a drag or an alignment): the fields show it again.
+    refresh: bool,
+}
+
+impl DialogCamCoordinateSystem {
+    fn new(s: &Session) -> Self {
+        let zero = || crate::length_input::shown(&s.doc, 0.0);
+        DialogCamCoordinateSystem {
+            gnomon: DynamicGnomon::default(),
+            target_setup: None,
+            name: String::new(),
+            origin_x: zero(),
+            origin_y: zero(),
+            origin_z: zero(),
+            refresh: false,
+        }
+    }
+
+    /// Write the frame's origin into the fields, where it moved in the view.
+    fn sync_fields(&mut self, doc: &solidcraft_engine::doc::Document) {
+        let o = self.gnomon.origin();
+        self.origin_x = crate::length_input::shown(doc, o.x);
+        self.origin_y = crate::length_input::shown(doc, o.y);
+        self.origin_z = crate::length_input::shown(doc, o.z);
+    }
+}
+
+/// The dialog's rows: its name, the alignment mode, and the origin's three values.
+fn coordinate_system_rows(app: &mut SolveApp, ui: &mut egui::Ui, f: &mut DialogCamCoordinateSystem) -> bool {
+    let mut enter = crate::ui_kit::text_row(ui, "label.name", &mut f.name, "").0;
+    let labels: Vec<&str> = ALIGN_LABELS.iter().map(|l| crate::i18n::tr_label(l)).collect();
+    let mut mode = GnomonAlignMode::ALL.iter().position(|m| *m == f.gnomon.align_mode()).unwrap_or(0);
+    if crate::ui_kit::choice_row(ui, "label.alignment", "cam_cs_align", &mut mode, &labels).changed()
+        && let Some(m) = GnomonAlignMode::ALL.get(mode)
+    {
+        f.gnomon.set_align_mode(*m);
+    }
+    // A drag in the view writes its origin here; typing here moves the frame.
+    if f.refresh {
+        f.sync_fields(&app.session.doc);
+        f.refresh = false;
+    }
+    enter |= crate::ui_kit::expr_row(ui, "label.origin_x", &mut f.origin_x);
+    enter |= crate::ui_kit::expr_row(ui, "label.origin_y", &mut f.origin_y);
+    enter |= crate::ui_kit::expr_row(ui, "label.origin_z", &mut f.origin_z);
+    let mut o = f.gnomon.origin();
+    let mut typed = false;
+    for (text, slot) in [(&f.origin_x, 0usize), (&f.origin_y, 1), (&f.origin_z, 2)] {
+        let Ok(v) = crate::length_input::eval(&app.session.doc, text.trim(), solidcraft_engine::doc::expr::Kind::Length) else { continue };
+        if !v.is_finite() {
+            continue;
+        }
+        let next = match slot {
+            0 => Vec3::new(v, o.y, o.z),
+            1 => Vec3::new(o.x, v, o.z),
+            _ => Vec3::new(o.x, o.y, v),
+        };
+        if next != o {
+            o = next;
+            typed = true;
+        }
+    }
+    if typed {
+        let _ = f.gnomon.set_origin(o);
+    }
+    let axes = [f.gnomon.x_axis().vec(), f.gnomon.y_axis().vec(), f.gnomon.z_axis().vec()];
+    let readout = ["X", "Y", "Z"]
+        .into_iter()
+        .zip(axes)
+        .map(|(name, v)| format!("{name} ({:.2}, {:.2}, {:.2})", v.x, v.y, v.z))
+        .collect::<Vec<_>>()
+        .join("   ");
+    crate::ui_kit::status_line(ui, &readout, crate::ui_kit::StatusTone::Dim);
+    enter
+}
+
+/// The command OK runs: the exact frame the gnomon holds.
+fn coordinate_system_commands(f: &DialogCamCoordinateSystem) -> Result<Vec<(String, Value)>, String> {
+    let (x, y, z) = (f.gnomon.x_axis().vec(), f.gnomon.y_axis().vec(), f.gnomon.z_axis().vec());
+    if [x, y, z].iter().any(|v| !v.is_finite()) {
+        return Err("the frame's axes are not numbers".into());
+    }
+    let point = |v: Vec3| json!([v.x, v.y, v.z]);
+    let origin = f.gnomon.origin();
+    if !origin.is_finite() {
+        return Err("the frame's origin is not a number".into());
+    }
+    let mut p = json!({
+        "origin": point(origin),
+        "x_axis": point(x),
+        "y_axis": point(y),
+        "z_axis": point(z),
+    });
+    let name = f.name.trim();
+    if !name.is_empty() {
+        p["name"] = json!(name);
+    }
+    Ok(vec![("cam.coordinate_system.create".to_string(), p)])
+}
+
+/// Draw the gnomon over the view and take this frame's drag; a pick in the view aligns the frame
+/// to what was picked, as the mode says.
+pub fn overlay(app: &mut SolveApp, ui: &mut egui::Ui, painter: &Painter, proj: &Proj, d: &mut Dialog) {
+    let Kind::Cam(Zcam::CoordinateSystem(f)) = &mut d.kind else { return };
+    let input = InputState::read(ui);
+    if f.gnomon.interact(proj, &input).is_some() {
+        f.refresh = true;
+    }
+    // The pick is this view's click on geometry, never the picks of an older mode or a drag.
+    if let Some(sel) = d.inputs.first_mut().and_then(|i| i.items.drain(..).next())
+        && align_to(app, f, &sel)
+    {
+        f.refresh = true;
+    }
+    f.gnomon.draw(painter, proj, &Tokens::get());
+}
+
+/// Whether the open coordinate system dialog's gnomon has a handle under `p`: a press there
+/// drags the frame, not the camera, and picks nothing in the model.
+pub(crate) fn gnomon_owns(app: &SolveApp, proj: &Proj, p: Pos2) -> bool {
+    let gnomon = app.dialog.as_ref().and_then(|d| match &d.kind {
+        Kind::Cam(Zcam::CoordinateSystem(f)) => Some(&f.gnomon),
+        _ => None,
+    });
+    gnomon.is_some_and(|g| g.contains_pointer(proj, p))
+}
+
+/// Move or turn `f`'s frame to what `sel` is: a point for its origin, a planar face's normal for
+/// its Z or a straight edge's direction for its X, as the alignment mode says. True when the
+/// frame changed.
+pub(crate) fn align_to(app: &SolveApp, f: &mut DialogCamCoordinateSystem, sel: &Sel) -> bool {
+    match f.gnomon.align_mode() {
+        GnomonAlignMode::Free => false,
+        GnomonAlignMode::SnapOrigin => match sel {
+            Sel::Face { point, .. } | Sel::Edge { point, .. } | Sel::Vertex { point, .. } => f.gnomon.set_origin(*point),
+            _ => false,
+        },
+        GnomonAlignMode::AlignZFace => match sel {
+            Sel::Face { body, index, .. } => planar_normal(app, body, *index).is_some_and(|n| f.gnomon.set_z_axis(n)),
+            _ => false,
+        },
+        GnomonAlignMode::AlignXEdge => match sel {
+            Sel::Edge { body, index, .. } => straight_edge_direction(app, body, *index).is_some_and(|x| f.gnomon.set_x_axis(x)),
+            _ => false,
+        },
+    }
+}
+
+/// The outward normal of the planar face `index` of `body`, from the B-rep's own surface.
+fn planar_normal(app: &SolveApp, body: &str, index: usize) -> Option<Vec3> {
+    let st = crate::open_meshing::session_world(&app.session);
+    match solidcraft_engine::kernel::face_surface(&st.body(body)?.body, index)? {
+        FaceSurface::Plane { normal, .. } => Some(normal.vec()),
+        _ => None,
+    }
+}
+
+/// The direction of the straight edge `index` of `body`, from the B-rep's own line. Curved edges
+/// have no single direction, so they align nothing.
+fn straight_edge_direction(app: &SolveApp, body: &str, index: usize) -> Option<Vec3> {
+    let st = crate::open_meshing::session_world(&app.session);
+    let b = st.body(body)?;
+    let solidcore_record::brep::Curve::Line { start, end } = &b.body.record().edges.get(index)?.curve else { return None };
+    let dir = (Vec3::new(end[0], end[1], end[2]) - Vec3::new(start[0], start[1], start[2])).normalized()?;
+    // The largest part points positive, as a joint's axis is: whichever way the edge was
+    // tessellated must not flip the frame.
+    let leading = [dir.x, dir.y, dir.z].into_iter().max_by(|a, b| a.abs().total_cmp(&b.abs()))?;
+    Some(if leading < 0.0 { -dir } else { dir })
 }
 
 /// One entry of the tool library, as `cam.tool.list` reports it.
@@ -466,6 +663,10 @@ impl std::ops::DerefMut for DialogCamPocket {
 /// Start the CAM workspace dialog `id` opens; none for another command.
 pub fn start_workspace(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
     match id {
+        "cam.coordinate_system.create" => {
+            let f = DialogCamCoordinateSystem::new(&app.session);
+            Some((Kind::Cam(Zcam::CoordinateSystem(f)), vec![SelInput::new("Alignment", FACES | EDGES | VERTICES, false)]))
+        }
         "cam.setup.create" => Some((Kind::Cam(Zcam::Setup(DialogCamSetup::new(app))), vec![SelInput::new("Bodies", BODIES, true)])),
         "cam.tool.list" => Some((Kind::Cam(Zcam::ToolLibrary(DialogCamToolLibrary::new(app))), Vec::new())),
         "cam.toolpath.contour" => Some((Kind::Cam(Zcam::Contour(DialogCamContour::new(app))), Vec::new())),
@@ -478,6 +679,7 @@ pub fn start_workspace(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)
 pub fn zcam_rows(app: &mut SolveApp, ui: &mut egui::Ui, form: &mut Zcam) -> bool {
     match form {
         Zcam::Setup(f) => setup_rows(app, ui, f),
+        Zcam::CoordinateSystem(f) => coordinate_system_rows(app, ui, f),
         Zcam::ToolLibrary(f) => tool_rows(app, ui, f),
         Zcam::Contour(f) => toolpath_rows(app, ui, &mut f.form),
         Zcam::Pocket(f) => toolpath_rows(app, ui, &mut f.form),
@@ -553,6 +755,7 @@ fn toolpath_rows(app: &mut SolveApp, ui: &mut egui::Ui, f: &mut DialogCamToolpat
 pub fn zcam_commands(app: &SolveApp, form: &Zcam, inputs: &[SelInput]) -> Result<Vec<(String, Value)>, String> {
     match form {
         Zcam::Setup(f) => setup_commands(app, f, inputs),
+        Zcam::CoordinateSystem(f) => coordinate_system_commands(f),
         Zcam::ToolLibrary(f) => tool_commands(app, f),
         Zcam::Contour(f) => toolpath_commands(app, &f.form, "cam.toolpath.contour"),
         Zcam::Pocket(f) => toolpath_commands(app, &f.form, "cam.toolpath.pocket"),

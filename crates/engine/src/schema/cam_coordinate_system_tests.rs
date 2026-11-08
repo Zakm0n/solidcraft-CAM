@@ -47,6 +47,17 @@ fn create_stores_a_unit_triad_and_its_reply_matches_the_output_schema() {
 }
 
 #[test]
+fn a_missing_y_axis_is_computed_from_z_cross_x() {
+    let mut s = Session::default();
+    let reply = s.execute("cam.coordinate_system.create", &json!({"x_axis": [0, 1, 0], "z_axis": [0, 0, 1]})).unwrap();
+    assert_eq!(reply["y_axis"], json!([-1.0, 0.0, 0.0]), "Y is the direction square to X and Z");
+    // Parallel X and Z leave no third direction.
+    let refused = s.execute("cam.coordinate_system.create", &json!({"x_axis": [0, 0, 1], "z_axis": [0, 0, 2]})).unwrap_err().to_string();
+    assert!(refused.contains("square"), "{refused}");
+    assert_eq!(s.doc.coordinate_systems.len(), 1);
+}
+
+#[test]
 fn create_refuses_axes_that_are_not_square_and_repeated_names() {
     let mut s = Session::default();
     let refused = s.execute("cam.coordinate_system.create", &json!({"x_axis": [1, 0, 0], "y_axis": [1, 0, 0]})).unwrap_err().to_string();

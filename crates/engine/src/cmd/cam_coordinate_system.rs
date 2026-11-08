@@ -28,15 +28,20 @@ pub static COMMANDS: &[CommandSpec] =
         .icon("origin")
         .contract(&CREATE_CONTRACT)
         .output(output_schema_for::<CoordinateSystemCreated>)
-        .params("origin?: [x,y,z] mm (default 0,0,0); x_axis?, y_axis?, z_axis?: directions (default the model's, stored as unit vectors); name?")
+        .params("origin?: [x,y,z] mm (default 0,0,0); x_axis?, z_axis?: directions (default the model's, stored as unit vectors); y_axis?: a direction (default z_axis × x_axis); name?")
         .doc_only()];
 
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "cam.coordinate_system.create";
     let origin = point(p, "origin", cmd, [0.0; 3])?;
     let x = unit(p, "x_axis", cmd, [1.0, 0.0, 0.0])?;
-    let y = unit(p, "y_axis", cmd, [0.0, 1.0, 0.0])?;
     let z = unit(p, "z_axis", cmd, [0.0, 0.0, 1.0])?;
+    // Y is the frame's third direction: given, it must be square to the other two; left out, it
+    // is computed from them (Z × X), so a call that names only X and Z always gets a square triad.
+    let y = match p.get("y_axis") {
+        None | Some(Value::Null) => square_third(z, x).ok_or_else(|| bad(cmd, "x_axis and z_axis must be square to each other"))?,
+        Some(_) => unit(p, "y_axis", cmd, [0.0, 1.0, 0.0])?,
+    };
     for (a, b, name) in [(x, y, "x_axis and y_axis"), (y, z, "y_axis and z_axis"), (z, x, "z_axis and x_axis")] {
         if dot(a, b).abs() > SQUARE {
             return Err(bad(cmd, format!("{name} must be square to each other")));
@@ -97,4 +102,12 @@ fn unit(p: &Value, k: &str, cmd: &str, default: [f64; 3]) -> Result<[f64; 3]> {
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// The unit direction square to both `a` and `b`: `a × b`, or `None` where they are parallel (or
+/// one is not a finite number), so there is no third direction.
+fn square_third(a: [f64; 3], b: [f64; 3]) -> Option<[f64; 3]> {
+    let c = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let length = dot(c, c).sqrt();
+    (length > 1e-9 && length.is_finite()).then(|| [c[0] / length, c[1] / length, c[2] / length])
 }

@@ -324,6 +324,7 @@ pub(crate) fn owns_pointer(app: &SolveApp, proj: &Proj, p: Pos2) -> bool {
     // The triad only registers an egui hit widget after a handle is under the pointer.
     // Test its geometry before navigation, including the first frame entering a handle.
     crate::joint_handles::owns_pointer(app, proj, p)
+        || crate::dialogs_coupling::cam::gnomon_owns(app, proj, p)
         || app.dialog.as_ref().and_then(|d| crate::dialogs_move::triad(app, d)).is_some_and(|t| crate::gizmo::contains_pointer(proj, &t, p))
         || app
             .dialog
@@ -351,6 +352,12 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj
     let Some(mut d) = app.dialog.take() else { return };
     if matches!(d.kind, Kind::Assembly(_)) {
         crate::dialogs_assembly::overlay(app, painter, proj, &mut d);
+        app.dialog = Some(d);
+        return;
+    }
+    // The coordinate system's dynamic gnomon: drawn over the model, dragged in place.
+    if matches!(d.kind, Kind::Cam(crate::dialogs_coupling::cam::Zcam::CoordinateSystem(_))) {
+        crate::dialogs_coupling::cam::overlay(app, ui, painter, proj, &mut d);
         app.dialog = Some(d);
         return;
     }

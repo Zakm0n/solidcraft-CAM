@@ -18,8 +18,9 @@ pub struct CreateCoordinateSystemParams {
     /// as a unit vector.
     #[serde(default)]
     pub x_axis: Option<Point3>,
-    /// The machine's +Y direction. Default: the model's +Y, [0, 1, 0]. Any length; it is stored
-    /// as a unit vector.
+    /// The machine's +Y direction. Default: computed as `z_axis × x_axis` (the direction square to
+    /// both, so a call naming only X and Z always gets a square triad). Any length; it is stored as
+    /// a unit vector.
     #[serde(default)]
     pub y_axis: Option<Point3>,
     /// The machine's +Z direction. Default: the model's +Z, [0, 0, 1]. Any length; it is stored

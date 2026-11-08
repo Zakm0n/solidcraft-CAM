@@ -4,7 +4,6 @@ use std::rc::Rc;
 use serde_json::json;
 use solidcore_record::Vec3;
 use solidcraft_engine::Session;
-use solidcraft_engine::geom::prelude::*;
 
 use super::*;
 use crate::Services;
@@ -288,4 +287,71 @@ fn the_tool_library_dialog_creates_and_edits_tools() {
         app.run(&id, params).unwrap();
     }
     assert_eq!(app.session.doc.cam.tools[0].diameter, 8.0);
+}
+
+/// The Coordinate System dialog sends `cam.coordinate_system.create` with the exact frame its
+/// gnomon holds: the origin and three square axes.
+#[test]
+fn the_coordinate_system_dialog_places_the_frame() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.coordinate_system.create")
+        .expect("the Coordinate System command opens a dialog");
+    {
+        let Kind::Cam(Zcam::CoordinateSystem(f)) = &mut d.kind else {
+            panic!("cam.coordinate_system.create has the wrong dialog");
+        };
+        f.name = "Stock Top".into();
+        assert!(f.gnomon.set_origin(Vec3::new(10.0, 20.0, 30.0)));
+        assert!(f.gnomon.set_z_axis(Vec3::new(0.0, 0.0, 2.0)));
+        assert!(f.gnomon.set_x_axis(Vec3::new(0.0, 1.0, 0.0)));
+    }
+    let cmds = apply_commands(&app, &d).unwrap();
+    assert_eq!(cmds[0].0, "cam.coordinate_system.create");
+    assert_eq!(cmds[0].1["name"], "Stock Top");
+    assert_eq!(cmds[0].1["origin"], json!([10.0, 20.0, 30.0]));
+    assert_eq!(cmds[0].1["x_axis"], json!([0.0, 1.0, 0.0]));
+    assert_eq!(cmds[0].1["y_axis"], json!([-1.0, 0.0, 0.0]), "Y is Z × X");
+    assert_eq!(cmds[0].1["z_axis"], json!([0.0, 0.0, 1.0]));
+    for (id, params) in cmds {
+        app.run(&id, params).unwrap();
+    }
+    let cs = &app.session.doc.coordinate_systems[0];
+    assert_eq!(cs.name, "Stock Top");
+    assert_eq!(cs.origin, [10.0, 20.0, 30.0]);
+}
+
+/// A picked planar face gives the frame its Z, a picked straight edge its X, and a picked point
+/// its origin; in Free mode a pick moves nothing.
+#[test]
+fn a_picked_face_or_edge_aligns_the_frame() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    app.run("solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Block"})).unwrap();
+    let body = app.session.world_state().unwrap().bodies[0].name.clone();
+    let bottom = (0..64).find(|&i| super::planar_normal(&app, &body, i).is_some_and(|n| n.z < -0.999)).expect("the box's bottom face");
+    let edge = {
+        let st = app.session.world_state().unwrap();
+        let b = st.body(&body).unwrap();
+        (0..b.body.record().edges.len())
+            .find(|&i| {
+                matches!(&b.body.record().edges[i].curve, solidcore_record::brep::Curve::Line { start, end }
+                    if (end[0] - start[0]).abs() < 1e-9
+                        && (end[2] - start[2]).abs() < 1e-9
+                        && (end[1] - start[1]).abs() > 1e-9)
+            })
+            .expect("an edge along Y")
+    };
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.coordinate_system.create").expect("the dialog opens");
+    let Kind::Cam(Zcam::CoordinateSystem(f)) = &mut d.kind else { panic!("the dialog's kind") };
+    let face = Sel::Face { body: body.clone(), index: bottom, point: Vec3::new(0.0, 0.0, 0.0) };
+    assert!(!super::align_to(&app, f, &face), "Free mode takes no pick");
+    f.gnomon.set_align_mode(GnomonAlignMode::AlignZFace);
+    assert!(super::align_to(&app, f, &face));
+    assert!(f.gnomon.z_axis().vec().dist(Vec3::new(0.0, 0.0, -1.0)) < 1e-9, "{:?}", f.gnomon.z_axis().vec());
+    f.gnomon.set_align_mode(GnomonAlignMode::AlignXEdge);
+    assert!(super::align_to(&app, f, &Sel::Edge { body: body.clone(), index: edge, point: Vec3::ZERO }));
+    assert!((f.gnomon.x_axis().vec().y.abs() - 1.0).abs() < 1e-9, "{:?}", f.gnomon.x_axis().vec());
+    f.gnomon.set_align_mode(GnomonAlignMode::SnapOrigin);
+    let at = Vec3::new(5.0, 6.0, 0.0);
+    assert!(super::align_to(&app, f, &Sel::Vertex { body, point: at }));
+    assert_eq!(f.gnomon.origin(), at);
 }
