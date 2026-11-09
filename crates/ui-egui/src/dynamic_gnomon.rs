@@ -7,9 +7,14 @@
 //! The widget owns only its own state: it draws over the viewport, hit-tests its handles against
 //! the projected geometry, reports a drag's [`Change`] and remembers which of its click modes a
 //! press opened ([`GnomonActiveState`]). The caller decides what the change means (the CAM
-//! coordinate system dialog writes it into the frame's values), resolves geometry for a snap (the
-//! B-rep's vertices, edge midpoints, circle centres and face centroids) and shows the floating
-//! value entry a click on a shaft or a wheel opens.
+//! coordinate system dialog writes it into the frame's values), hands the frame the geometry a
+//! live snap may take ([`SnapCandidate`]: the B-rep's vertices, edge midpoints, circle centres and
+//! face centroids) and shows the floating value entry a click on a shaft or a wheel opens.
+//!
+//! While Origin Snap or Axis Orbit is on, the frame follows the pointer without a drag: the
+//! nearest candidate within [`SNAP_RADIUS`] screen points is taken, and a pointer away from every
+//! candidate is unprojected onto the view plane through where the mode began. The frame keeps its
+//! axes square throughout (Gram-Schmidt), so a snap never tilts it.
 
 use egui::{Align2, Color32, FontId, Painter, Pos2, Shape, Stroke};
 use solidcore_record::Vec3;
@@ -41,6 +46,13 @@ const LABEL_GAP: f32 = 10.0;
 const RING_POINTS: usize = 64;
 /// Where an arm starts, as a share of its length, so it leaves the origin ball clear.
 const ARM_START: f64 = 0.18;
+/// How near (screen points) a live snap's cursor must come to a candidate to take it.
+pub const SNAP_RADIUS: f32 = 20.0;
+/// The radius of the mark a live snap draws on the candidate it takes, in points.
+const SNAP_MARK: f32 = 5.0;
+/// The most candidates a live snap looks through: a hostile design must not make a frame cost
+/// grow without a bound.
+const MAX_CANDIDATES: usize = 4096;
 
 /// One of the frame's three axes, in the order the colours name them: X red, Y green, Z blue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -119,13 +131,36 @@ impl GnomonAlignMode {
         [GnomonAlignMode::Free, GnomonAlignMode::SnapOrigin, GnomonAlignMode::AlignZFace, GnomonAlignMode::AlignXEdge];
 }
 
-/// The frame change one frame of a drag made.
+/// The frame change one frame of a drag made, or a live snap took.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Change {
     /// The origin moved by this offset, in mm.
     Translate(Vec3),
     /// The frame turned about one of its axes by this angle, in radians.
     Rotate { axis: Axis, angle: f64 },
+    /// The frame was placed on the geometry under the pointer (Origin Snap or Axis Orbit): its
+    /// own origin and axes are the change.
+    Frame,
+}
+
+/// A point a live snap may take while Origin Snap or Axis Orbit follows the pointer: a B-rep
+/// vertex, an edge's midpoint, a circle's centre or a face's centroid, and a sketch's point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SnapCandidate {
+    /// The exact point, in model space (mm).
+    pub point: Vec3,
+    /// A planar face's outward normal, when the point is that face's centroid. Origin Snap turns
+    /// the frame's Z to it.
+    pub normal: Option<Vec3>,
+}
+
+/// Where a click mode began: the frame the fallback ray and the axes are measured from, so a
+/// free-space move never drifts as the frame follows the pointer.
+#[derive(Clone, Copy, Debug)]
+struct SnapBase {
+    origin: Vec3,
+    /// +X, +Y and +Z as the mode opened.
+    axes: [Vec3; 3],
 }
 
 /// The primary pointer's state, so [`DynamicGnomon::interact`] can be driven without an
@@ -241,6 +276,12 @@ pub struct DynamicGnomon {
     /// inside it belongs to the entry's own widgets, so it neither starts a drag nor ends the
     /// click mode the entry was opened by.
     entry_rect: Option<egui::Rect>,
+    /// Where the click mode began, while Origin Snap or Axis Orbit follows the pointer.
+    snap_base: Option<SnapBase>,
+    /// The points a live snap may take.
+    candidates: Vec<SnapCandidate>,
+    /// Where the candidate a live snap took shows on screen, while there is one.
+    snap_at: Option<Pos2>,
 }
 
 impl Default for DynamicGnomon {
@@ -255,6 +296,9 @@ impl Default for DynamicGnomon {
             drag: None,
             state: GnomonActiveState::Idle,
             entry_rect: None,
+            snap_base: None,
+            candidates: Vec::new(),
+            snap_at: None,
         }
     }
 }
@@ -322,9 +366,49 @@ impl DynamicGnomon {
     }
 
     /// Set the click mode; the caller clears it to [`GnomonActiveState::Idle`] once its pick has
-    /// been taken, so each click mode acts once.
+    /// been taken, so each click mode acts once. Opening Origin Snap or Axis Orbit remembers the
+    /// frame it began from, which the fallback ray and the orbit's square frame are measured from.
     pub fn set_active_state(&mut self, state: GnomonActiveState) {
+        self.enter_state(state);
+    }
+
+    /// The points a live snap may take, as the caller found them in the design. Only those near
+    /// the pointer's path are used, and no more than a bounded number of them.
+    pub fn set_snap_candidates(&mut self, candidates: Vec<SnapCandidate>) {
+        self.candidates = candidates.into_iter().filter(|c| finite(c.point)).take(MAX_CANDIDATES).collect();
+        if self.snap_base.is_none() {
+            self.snap_at = None;
+        }
+    }
+
+    /// Where the candidate a live snap took shows on screen, while one is within reach.
+    pub fn snap_mark(&self) -> Option<Pos2> {
+        self.snap_at
+    }
+
+    /// Whether a click mode is following the pointer, so the view must keep repainting while it
+    /// is on: Origin Snap and Axis Orbit place the frame on every pointer move.
+    pub fn tracks_pointer(&self) -> bool {
+        matches!(self.state, GnomonActiveState::OriginSnap | GnomonActiveState::AxisOrbit(_))
+    }
+
+    /// Keep the view repainting while a click mode is on: live snapping needs a frame for every
+    /// pointer move, even when nothing else would ask for one.
+    pub fn request_repaint(&self, ctx: &egui::Context) {
+        if self.tracks_pointer() {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Take `state` as the click mode, remembering the frame Origin Snap and Axis Orbit follow the
+    /// pointer from. Any other mode forgets it.
+    fn enter_state(&mut self, state: GnomonActiveState) {
         self.state = state;
+        self.snap_base = matches!(state, GnomonActiveState::OriginSnap | GnomonActiveState::AxisOrbit(_))
+            .then(|| SnapBase { origin: self.origin, axes: self.axes() });
+        if self.snap_base.is_none() {
+            self.snap_at = None;
+        }
     }
 
     /// Say where the caller's floating value entry sits, while one is open, so a press inside it
@@ -479,16 +563,29 @@ impl DynamicGnomon {
             }
             GnomonActiveState::Idle | GnomonActiveState::RelativeInput { .. } => {}
         }
+        // The point a live snap holds the frame on: a filled dot in the accent colour, ringed in
+        // the panel colour so it reads over any geometry.
+        if let Some(at) = self.snap_at {
+            painter.circle(at, SNAP_MARK, theme.accent, Stroke::new(2.0, theme.panel));
+        }
         publish_handles(&shapes);
+        if let Some(at) = self.snap_at {
+            crate::scenario::publish_handle("dynamic_gnomon:snap", at);
+        }
     }
 
     /// Follow this frame's drag, or begin one when the press landed on a handle. Every frame a
     /// drag changes the frame, the change is applied here and returned for the caller's values.
     /// A press that is released without moving is a click: it opens the handle's mode
     /// ([`GnomonActiveState`]) rather than moving the frame.
+    ///
+    /// While Origin Snap or Axis Orbit is on, the frame follows the pointer without a drag: it is
+    /// placed on the candidate within [`SNAP_RADIUS`], or on the view plane through where the mode
+    /// began, and the change is returned the same way. A press then takes that place as it ends
+    /// the mode.
     pub fn interact(&mut self, proj: &Proj, input: &InputState) -> Option<Change> {
         if input.escape {
-            self.state = GnomonActiveState::Idle;
+            self.enter_state(GnomonActiveState::Idle);
         }
         if let Some(mut drag) = self.drag {
             let change = input.pointer.filter(|p| finite_screen(*p)).and_then(|p| {
@@ -502,10 +599,10 @@ impl DynamicGnomon {
                 self.hovered_handle = GnomonHandle::None;
                 if drag.moved {
                     // A drag places the frame; a click asks for a mode or a value instead.
-                    self.state = GnomonActiveState::Idle;
+                    self.enter_state(GnomonActiveState::Idle);
                 } else if let Some(mode) = click_mode(drag.handle, drag.press) {
                     // A second click on the handle that opened a snap mode drops it.
-                    self.state = toggled(self.state, mode);
+                    self.enter_state(toggled(self.state, mode));
                 }
                 self.drag = None;
             } else {
@@ -517,19 +614,115 @@ impl DynamicGnomon {
         // A press on the caller's value entry belongs to that entry: it must not end the mode the
         // entry was opened by, nor start a drag behind the entry.
         self.hovered_handle = pointer.filter(|p| !self.on_entry(*p)).map_or(GnomonHandle::None, |p| self.hit(proj, p));
+        let mut pressed = false;
         if input.primary_pressed
             && let Some(p) = pointer
             && !self.on_entry(p)
         {
-            let handle = self.hit(proj, p);
+            pressed = true;
+            // While a click mode follows the pointer, the origin ball sits under it by
+            // construction: a press there is the commit the mode is waiting for, not a second
+            // click on the handle that opened it.
+            let mut handle = self.hit(proj, p);
+            if handle == GnomonHandle::Origin && self.snap_base.is_some() {
+                handle = GnomonHandle::None;
+            }
             if handle != GnomonHandle::None {
                 self.begin(proj, p, handle);
             } else {
-                // A press on the model is a pick: the click mode ends.
-                self.state = GnomonActiveState::Idle;
+                // A press on the model takes the place the live snap found and ends the click
+                // mode: the pick the caller takes is this place, not one under a moving pointer.
+                self.enter_state(GnomonActiveState::Idle);
             }
         }
+        // A click mode follows the pointer with no drag and no button down: the frame is placed
+        // where the cursor points every frame, so a snap is taken on hover alone.
+        if !pressed && !input.primary_pressed && !input.primary_down && self.drag.is_none() {
+            if let Some(p) = pointer.filter(|p| !self.on_entry(*p)) {
+                return self.track(proj, p);
+            }
+            self.snap_at = None;
+        }
         None
+    }
+
+    /// Place the frame where `pos` points, for the click mode the frame is in. A candidate within
+    /// [`SNAP_RADIUS`] is taken exactly; away from every candidate the pointer is unprojected
+    /// onto the view plane through where the mode began. The change is reported only when the
+    /// frame actually moved, so a still pointer costs nothing.
+    fn track(&mut self, proj: &Proj, pos: Pos2) -> Option<Change> {
+        let base = self.snap_base?;
+        let snap = self.nearest(proj, pos);
+        self.snap_at = snap.map(|(_, at, _)| at);
+        let before = (self.origin, self.axes());
+        match self.state {
+            GnomonActiveState::OriginSnap => {
+                let point = match snap {
+                    Some((candidate, ..)) => candidate.point,
+                    // Free space: the point under the pointer on a plane facing the camera
+                    // through where the mode began, so the frame follows the cursor.
+                    None => crate::gizmo::on_plane(proj, pos, base.origin, view_dir(proj, base.origin))?,
+                };
+                if !finite(point) {
+                    return None;
+                }
+                self.origin = point;
+                match snap.and_then(|(candidate, ..)| candidate.normal) {
+                    // A face's centre turns the frame's Z to the face's outward normal, X kept
+                    // as square to it as it can be (Gram-Schmidt).
+                    Some(normal) => {
+                        let _ = self.set_z_axis(normal);
+                    }
+                    // Any other point moves the origin only, in the frame the mode began with.
+                    None => {
+                        let _ = self.set_frame(base.axes[0], base.axes[2]);
+                    }
+                }
+            }
+            GnomonActiveState::AxisOrbit(axis) => {
+                // Axis Orbit keeps the frame's origin where it was: only the axes turn.
+                self.origin = base.origin;
+                let target = match snap {
+                    Some((candidate, ..)) => candidate.point,
+                    None => crate::gizmo::on_plane(proj, pos, base.origin, view_dir(proj, base.origin))?,
+                };
+                let direction = (target - base.origin).normalized().filter(|d| finite(*d))?;
+                let _ = self.set_axis_square(base.axes, axis, direction);
+            }
+            GnomonActiveState::Idle | GnomonActiveState::RelativeInput { .. } => return None,
+        }
+        ((self.origin, self.axes()) != before).then_some(Change::Frame)
+    }
+
+    /// The candidate nearest `pos` on screen, within [`SNAP_RADIUS`], with where it shows.
+    fn nearest(&self, proj: &Proj, pos: Pos2) -> Option<(SnapCandidate, Pos2, f32)> {
+        let mut best: Option<(SnapCandidate, Pos2, f32)> = None;
+        for candidate in &self.candidates {
+            let Some(at) = proj.to_screen(candidate.point) else { continue };
+            let distance = at.distance(pos);
+            if distance <= SNAP_RADIUS && best.as_ref().is_none_or(|(_, _, d)| distance < *d) {
+                best = Some((*candidate, at, distance));
+            }
+        }
+        best
+    }
+
+    /// Point `axis` along `direction`, its other two axes taken from `base` as near as they can
+    /// be kept while staying square to it (Gram-Schmidt), the three right-handed: `Z × X = Y`.
+    fn set_axis_square(&mut self, base: [Vec3; 3], axis: Axis, direction: Vec3) -> bool {
+        let Some(direction) = UnitVec3::new(direction) else { return false };
+        let (x, z) = match axis {
+            Axis::X => (direction, square_to(base[2], direction)),
+            Axis::Z => (square_to(base[0], direction), direction),
+            Axis::Y => {
+                let x = square_to(base[0], direction);
+                let Some(z) = x.vec().cross(direction.vec()).normalized().and_then(UnitVec3::new) else { return false };
+                (x, z)
+            }
+        };
+        self.x_axis = x;
+        self.z_axis = z;
+        true
     }
 
     /// Whether `handle` is the hovered or dragged one.

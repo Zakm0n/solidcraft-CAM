@@ -20,7 +20,7 @@ use crate::SolveApp;
 use crate::dialogs::Kind;
 use crate::dialogs::{Dialog, combo, field, form_row};
 use crate::dialogs_assembly::Asm;
-use crate::dynamic_gnomon::{DynamicGnomon, GnomonActiveState, GnomonAlignMode, GnomonHandle, InputState};
+use crate::dynamic_gnomon::{DynamicGnomon, GnomonActiveState, GnomonAlignMode, GnomonHandle, InputState, SnapCandidate};
 use crate::selection::{BODIES, EDGES, FACES, PROFILES, SelInput, SelectionExt as _, VERTICES};
 use crate::theme::Tokens;
 use crate::viewport::Proj;
@@ -480,6 +480,59 @@ fn snap_origin(gnomon: &mut DynamicGnomon, target: SnapTarget) -> bool {
     moved || aligned
 }
 
+/// The points a live Origin Snap or Axis Orbit may take while the frame is placed: every visible
+/// body's vertices, straight edges' midpoints, circles' centres and faces' centroids (a planar
+/// face's centroid carrying its outward normal), and every visible sketch's points. The B-rep is
+/// read exactly, as a pick is; a point that is not a finite number is left out, since a design
+/// file is input like any other.
+pub(crate) fn snap_candidates(app: &SolveApp) -> Vec<SnapCandidate> {
+    let st = crate::open_meshing::session_world(&app.session);
+    let hidden = &app.session.visibility.hidden_bodies;
+    let mut out = Vec::new();
+    for b in &st.bodies {
+        if hidden.iter().any(|name| name == &b.name) {
+            continue;
+        }
+        let record = b.body.record();
+        for vertex in &record.vertices {
+            if let Some(point) = finite_point(vertex.point) {
+                out.push(SnapCandidate { point, normal: None });
+            }
+        }
+        for (index, edge) in record.edges.iter().enumerate() {
+            let point = match &edge.curve {
+                solidcore_record::brep::Curve::Line { start, end } => {
+                    let (Some(start), Some(end)) = (finite_point(*start), finite_point(*end)) else { continue };
+                    Some((start + end) * 0.5)
+                }
+                solidcore_record::brep::Curve::Circle { .. } => solidcraft_engine::kernel::edge_circle(&b.body, index).map(|c| c.center),
+                _ => None,
+            };
+            if let Some(point) = point.filter(|p| p.is_finite()) {
+                out.push(SnapCandidate { point, normal: None });
+            }
+        }
+        let tol = (b.body.size() * 1e-3).max(1e-3);
+        for face in b.body.faces(tol).unwrap_or_default() {
+            if face.centroid.is_finite() {
+                out.push(SnapCandidate { point: face.centroid, normal: face.plane_normal });
+            }
+        }
+    }
+    for sketch in &st.sketches {
+        if app.session.visibility.hidden_sketches.contains(&sketch.feature) {
+            continue;
+        }
+        for point in &sketch.sketch.points {
+            let world = sketch.plane.to_world(point.pos);
+            if world.is_finite() {
+                out.push(SnapCandidate { point: world, normal: None });
+            }
+        }
+    }
+    out
+}
+
 impl DialogCamCoordinateSystem {
     /// Follow the click the gnomon took: the origin ball turns Origin Snap on, and a shaft or a
     /// wheel opens its value entry.
@@ -674,24 +727,38 @@ fn coordinate_system_commands(f: &DialogCamCoordinateSystem) -> Result<Vec<(Stri
 }
 
 /// Draw the gnomon over the view and take this frame's drag and clicks; a click opens a mode or a
-/// value entry, and a pick in the view snaps or aligns the frame as the mode says.
+/// value entry, and a pick in the view snaps or aligns the frame as the mode says. While Origin
+/// Snap or Axis Orbit is on the frame follows the pointer on hover, so the design's snap points are
+/// handed to it each such frame.
 pub fn overlay(app: &mut SolveApp, ui: &mut egui::Ui, painter: &Painter, proj: &Proj, d: &mut Dialog) {
     let Kind::Cam(Zcam::CoordinateSystem(f)) = &mut d.kind else { return };
-    let input = InputState::read(ui);
+    let mut input = InputState::read(ui);
     // Where the value entry sat last frame owns its own presses: the gnomon must not end the
     // click mode or start a drag behind it.
     f.gnomon.set_entry_rect(f.entry_rect);
     // The pick is this view's click on geometry, never the picks of an older mode or a drag. It
     // comes before this frame's press, so the click that takes a snap does not first end the mode
     // it snaps in.
-    if let Some(sel) = d.inputs.first_mut().and_then(|i| i.items.drain(..).next())
-        && f.take_pick(app, &sel)
-    {
-        f.refresh = true;
+    if let Some(sel) = d.inputs.first_mut().and_then(|i| i.items.drain(..).next()) {
+        if f.take_pick(app, &sel) {
+            f.refresh = true;
+        }
+        // That click is the pick's: a live snap holds the frame's origin under the pointer, so the
+        // gnomon must not also read the press as a click on its ball, which would re-open the
+        // mode the pick just ended.
+        input.primary_pressed = false;
+        input.primary_down = false;
+        input.primary_released = false;
     }
+    // The geometry a live snap may take: read only while a click mode follows the pointer, so a
+    // drag or an idle frame costs nothing.
+    let tracking = matches!(f.gnomon.active_state(), GnomonActiveState::OriginSnap | GnomonActiveState::AxisOrbit(_));
+    f.gnomon.set_snap_candidates(if tracking { snap_candidates(app) } else { Vec::new() });
     if f.gnomon.interact(proj, &input).is_some() {
         f.refresh = true;
     }
+    // A click mode needs a frame for every pointer move, even when nothing else asks for one.
+    f.gnomon.request_repaint(ui.ctx());
     // What a click on the ball, a cone, a shaft or a wheel asked for: a snap mode, an orbit mode,
     // or the floating value entry it sits at.
     f.follow_click();

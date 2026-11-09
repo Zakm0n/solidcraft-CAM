@@ -693,6 +693,145 @@ fn the_gnomon_blocks_the_viewport_marquee() {
     assert_eq!(g.active_state(), GnomonActiveState::OriginSnap);
     assert!(g.blocks_viewport_marquee(), "a snap mode waiting for its pick blocks the marquee");
     g.interact(&proj, &InputState { escape: true, ..InputState::default() });
+    // The snap mode followed the pointer to the view's corner; put the frame back in view so its
+    // arm can be pressed as before.
+    let _ = g.set_origin(Vec3::ZERO);
+    let shaft = on_arm(&g, &proj, Axis::Y, GnomonHandle::Translate(Axis::Y));
     press(&mut g, &proj, shaft);
     assert!(g.blocks_viewport_marquee(), "a drag blocks the marquee");
+}
+
+// Live snapping: while Origin Snap or Axis Orbit is on, the frame follows the pointer on hover,
+// with no drag needed: it takes a candidate within 20 screen points, and otherwise unprojects the
+// pointer onto the view plane through where the mode began.
+
+use crate::dynamic_gnomon::{Change, SnapCandidate};
+
+/// A view zoomed in on a 10 mm block, so each vertex and face centre stands well apart on screen
+/// and a 20-point snap reach can take exactly one of them. The angle is off the standard iso one,
+/// where points on a diagonal of the block project onto each other.
+fn live_projection() -> crate::viewport::Proj {
+    let cam = Camera { target: Vec3::new(5.0, 5.0, 5.0), distance: 24.0, yaw: 0.62, pitch: 0.48, ..Camera::default() };
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 900.0));
+    let vp = cam.view_proj(rect.width() as f64 / rect.height() as f64, 24.0);
+    crate::viewport::Proj { cam, vp, rect }
+}
+
+/// A pointer hovering `at`, with no button down: what a live snap reads each frame.
+fn hover(g: &mut DynamicGnomon, proj: &crate::viewport::Proj, at: egui::Pos2) -> Option<Change> {
+    g.interact(proj, &InputState { pointer: Some(at), ..InputState::default() })
+}
+
+/// #Z-CAM: Origin Snap follows the pointer on hover: a candidate within reach takes the frame's
+/// origin exactly, a planar face's centre turns its Z to the face's outward normal with the other
+/// axes kept square (Gram-Schmidt), and a pointer away from every candidate is unprojected onto
+/// the view plane through where the mode began.
+#[test]
+fn a_live_origin_snap_takes_the_point_under_the_pointer() {
+    let (app, _body) = block();
+    let candidates = super::snap_candidates(&app);
+    let face = *candidates
+        .iter()
+        .find(|c| c.normal.is_some_and(|n| n.dist(Vec3::X) < 1e-6) && c.point.dist(Vec3::new(10.0, 5.0, 5.0)) < 1e-6)
+        .expect("the box's +X face is a candidate, with its outward normal");
+    let proj = live_projection();
+    let at = proj.to_screen(face.point).expect("the face is in view");
+    assert!(proj.rect.contains(at), "the face shows in the view: {at:?}");
+    let mut g = DynamicGnomon::new(Vec3::ZERO, Vec3::X, Vec3::Z).expect("a frame at the origin");
+    g.set_snap_candidates(candidates);
+    g.set_active_state(GnomonActiveState::OriginSnap);
+    // A hover within the 20-point reach takes the face's centre, though the pointer is off it.
+    assert_eq!(hover(&mut g, &proj, at + egui::vec2(8.0, -6.0)), Some(Change::Frame), "the hover moves the frame");
+    assert!(g.origin().dist(face.point) < 1e-9, "the face's exact centre: {:?}", g.origin());
+    assert!(g.z_axis().vec().dist(Vec3::X) < 1e-9, "the face's outward normal: {:?}", g.z_axis().vec());
+    assert_eq!(g.snap_mark(), Some(at), "the mark sits on the point it took");
+    let a = g.axes();
+    assert!(a[0].dot(a[1]).abs() < 1e-9 && a[1].dot(a[2]).abs() < 1e-9 && a[2].dot(a[0]).abs() < 1e-9, "the frame stays square: {a:?}");
+    assert!((a[0].cross(a[1]).dot(a[2]) - 1.0).abs() < 1e-9, "the frame stays right-handed: {a:?}");
+    // Away from every candidate the frame follows the pointer on the plane facing the camera
+    // through where the mode began, keeping the axes it began with.
+    let empty = proj.rect.left_top() + egui::vec2(60.0, 60.0);
+    assert_eq!(hover(&mut g, &proj, empty), Some(Change::Frame));
+    assert_eq!(g.snap_mark(), None, "no candidate, no mark");
+    let back = proj.to_screen(g.origin()).expect("the origin stays in view");
+    assert!(back.distance(empty) < 1e-3, "the frame follows the pointer: {back:?} for {empty:?}");
+    assert!(g.z_axis().vec().dist(Vec3::Z) < 1e-9, "a point away from a face keeps the frame's Z: {:?}", g.z_axis().vec());
+    // A press takes that place and ends the mode: the frame stays where the snap put it.
+    let kept = g.origin();
+    g.interact(&proj, &InputState { pointer: Some(empty), primary_pressed: true, primary_down: true, ..InputState::default() });
+    assert_eq!(g.active_state(), GnomonActiveState::Idle, "a click commits and ends the mode");
+    assert_eq!(g.origin(), kept, "the commit keeps the place the snap found");
+    assert_eq!(g.snap_mark(), None, "the mark goes with the mode");
+}
+
+/// #Z-CAM: Axis Orbit follows the pointer on hover: the orbited axis points at the candidate
+/// within reach (or at the unprojected pointer), the origin stays put, and the other two axes stay
+/// rigidly square to it from the frame the mode began with.
+#[test]
+fn a_live_axis_orbit_turns_the_axis_towards_the_hovered_point() {
+    let proj = live_projection();
+    let target = Vec3::new(0.0, -3.0, 4.0);
+    let mut g = DynamicGnomon::new(Vec3::ZERO, Vec3::X, Vec3::Z).expect("a frame at the origin");
+    g.set_snap_candidates(vec![SnapCandidate { point: target, normal: None }]);
+    g.set_active_state(GnomonActiveState::AxisOrbit(Axis::Y));
+    let at = proj.to_screen(target).expect("the point is in view");
+    assert_eq!(hover(&mut g, &proj, at + egui::vec2(6.0, 6.0)), Some(Change::Frame), "the hover turns the frame");
+    let want = target.normalized().expect("a direction");
+    assert!(g.y_axis().vec().dist(want) < 1e-9, "the axis points at the point: {:?} for {want:?}", g.y_axis().vec());
+    assert_eq!(g.origin(), Vec3::ZERO, "Axis Orbit keeps the origin");
+    let a = g.axes();
+    assert!(a[0].dot(a[1]).abs() < 1e-9 && a[1].dot(a[2]).abs() < 1e-9 && a[2].dot(a[0]).abs() < 1e-9, "the frame stays square: {a:?}");
+    assert!((a[0].cross(a[1]).dot(a[2]) - 1.0).abs() < 1e-9, "the frame stays right-handed: {a:?}");
+    assert!(a[0].dist(Vec3::X) < 1e-9, "the axis the mode did not turn keeps its direction: {:?}", a[0]);
+    // Away from a candidate the axis follows the pointer, the origin still locked.
+    let away = proj.rect.center() + egui::vec2(240.0, 120.0);
+    assert_eq!(hover(&mut g, &proj, away), Some(Change::Frame));
+    assert_eq!(g.origin(), Vec3::ZERO);
+    assert_eq!(g.snap_mark(), None);
+    let centre = proj.to_screen(Vec3::ZERO).expect("the origin is in view");
+    let tip = proj.to_screen(g.origin() + g.y_axis().vec() * 40.0).expect("the axis tip is in view");
+    assert!(((tip - centre).normalized() - (away - centre).normalized()).length() < 1e-3, "the axis points at the pointer: {tip:?} for {away:?}");
+    // The frame the mode began from is what the other axes are taken from, so a second frame at
+    // the same pointer does not creep.
+    let axes = g.axes();
+    hover(&mut g, &proj, away);
+    assert!(g.axes()[0].dist(axes[0]) < 1e-12 && g.axes()[2].dist(axes[2]) < 1e-12, "the same pointer gives the same frame");
+}
+
+/// #Z-CAM: the geometry a live snap takes is the B-rep's own: a box offers its eight vertices, its
+/// twelve straight edges' midpoints and its six faces' centroids, the planar faces with their
+/// outward normals.
+#[test]
+fn live_snap_candidates_hold_the_vertices_midpoints_and_face_centres() {
+    let (app, _body) = block();
+    let candidates = super::snap_candidates(&app);
+    let there = |p: Vec3| candidates.iter().any(|c| c.point.dist(p) < 1e-6);
+    let corners: Vec<Vec3> = [0.0, 10.0].into_iter().flat_map(|x| [0.0, 10.0].into_iter().flat_map(move |y| [0.0, 10.0].map(move |z| Vec3::new(x, y, z)))).collect();
+    assert_eq!(corners.len(), 8);
+    assert!(corners.iter().all(|p| there(*p)), "every vertex is a candidate");
+    let midpoints = [Vec3::new(5.0, 0.0, 0.0), Vec3::new(5.0, 10.0, 0.0), Vec3::new(5.0, 0.0, 10.0), Vec3::new(5.0, 10.0, 10.0), Vec3::new(0.0, 5.0, 0.0), Vec3::new(10.0, 5.0, 0.0), Vec3::new(0.0, 5.0, 10.0), Vec3::new(10.0, 5.0, 10.0), Vec3::new(0.0, 0.0, 5.0), Vec3::new(10.0, 0.0, 5.0), Vec3::new(0.0, 10.0, 5.0), Vec3::new(10.0, 10.0, 5.0)];
+    assert!(midpoints.iter().all(|p| there(*p)), "every edge's midpoint is a candidate");
+    let faces = [(Vec3::new(10.0, 5.0, 5.0), Vec3::X), (Vec3::new(5.0, 10.0, 5.0), Vec3::Y), (Vec3::new(5.0, 5.0, 10.0), Vec3::Z)];
+    for (point, normal) in faces {
+        let found = candidates.iter().find(|c| c.point.dist(point) < 1e-6).unwrap_or_else(|| panic!("the face centre {point:?} is a candidate"));
+        assert!(found.normal.is_some_and(|n| n.dist(normal) < 1e-6), "the face's outward normal: {found:?}");
+    }
+    assert_eq!(candidates.iter().filter(|c| c.normal.is_some()).count(), 6, "six planar faces, six normals");
+    assert_eq!(candidates.iter().filter(|c| c.normal.is_none()).count(), 20, "eight vertices and twelve edge midpoints, no normals");
+}
+
+/// #Z-CAM: a click mode keeps the view repainting every frame, so live snapping sees the pointer
+/// move even when nothing else would draw; an idle frame asks for none.
+#[test]
+fn a_click_mode_keeps_the_view_repainting() {
+    let mut g = DynamicGnomon::default();
+    assert!(!g.tracks_pointer(), "an idle frame asks for no repaint");
+    g.set_active_state(GnomonActiveState::OriginSnap);
+    assert!(g.tracks_pointer(), "Origin Snap asks to repaint");
+    g.set_active_state(GnomonActiveState::AxisOrbit(Axis::Y));
+    assert!(g.tracks_pointer(), "Axis Orbit asks to repaint");
+    g.set_active_state(GnomonActiveState::RelativeInput { handle: GnomonHandle::Translate(Axis::X), pos: egui::Pos2::ZERO });
+    assert!(!g.tracks_pointer(), "a value entry follows no pointer");
+    g.set_active_state(GnomonActiveState::Idle);
+    assert!(!g.tracks_pointer(), "a mode that ended asks for no repaint");
 }
