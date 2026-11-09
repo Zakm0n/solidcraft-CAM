@@ -20,7 +20,7 @@ use crate::SolveApp;
 use crate::dialogs::Kind;
 use crate::dialogs::{Dialog, combo, field, form_row};
 use crate::dialogs_assembly::Asm;
-use crate::dynamic_gnomon::{DynamicGnomon, GnomonActiveState, GnomonAlignMode, GnomonHandle, InputState, SnapCandidate};
+use crate::dynamic_gnomon::{DynamicGnomon, GnomonActiveState, GnomonAlignMode, GnomonHandle, IncrementalKeys, InputState, SnapCandidate};
 use crate::selection::{BODIES, EDGES, FACES, PROFILES, SelInput, SelectionExt as _, VERTICES};
 use crate::theme::Tokens;
 use crate::viewport::Proj;
@@ -612,19 +612,29 @@ impl DialogCamCoordinateSystem {
     }
 }
 
+/// The id of the floating value entry's field, whose keyboard ownership the gnomon and the
+/// dialog both answer to while the entry is open.
+fn entry_field_id() -> egui::Id {
+    egui::Id::unique("zcam_gnomon_entry_value")
+}
+
 /// The floating value entry a click on a shaft or a wheel opens, at `at` where the click was: its
 /// label and unit, and the keyboard in its field. Enter applies it, Escape drops it, and a click
 /// anywhere outside it ends it; a click inside it belongs to its own field, so it stays open.
-fn entry_box(app: &SolveApp, ui: &mut egui::Ui, f: &mut DialogCamCoordinateSystem, at: Pos2) {
+fn entry_box(app: &SolveApp, ui: &mut egui::Ui, f: &mut DialogCamCoordinateSystem, at: Pos2, keys: IncrementalKeys) {
     let Some(entry) = f.entry.as_mut() else { return };
     let t = Tokens::get();
     let area = egui::Id::unique("zcam_gnomon_entry");
-    let id = egui::Id::unique("zcam_gnomon_entry_value");
-    let mut apply = false;
-    // The entry opens empty and takes the keyboard at once, so typing goes straight into it.
-    let focus = std::mem::take(&mut entry.focus);
-    if focus {
-        ui.memory_mut(|mem| mem.request_focus(id));
+    let id = entry_field_id();
+    // The entry opens empty and takes the keyboard at once, so typing goes straight into it. An
+    // area's first frame is its sizing pass, which takes no focus, so the field asks until it
+    // really holds the keyboard.
+    if entry.focus {
+        if ui.memory(|memory| memory.has_focus(id) && memory.had_focus_last_frame(id)) {
+            entry.focus = false;
+        } else {
+            ui.memory_mut(|memory| memory.request_focus(id));
+        }
     }
     let shown = Container::new(ui.ctx(), Surface::Canvas).area(area).fixed_pos(at + egui::vec2(t.space_8, t.space_8)).order(egui::Order::Foreground).show(
         ui.ctx(),
@@ -633,22 +643,25 @@ fn entry_box(app: &SolveApp, ui: &mut egui::Ui, f: &mut DialogCamCoordinateSyste
             Container::show_backing(ui, frame, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(entry.label()).color(t.text_dim).size(t.font_caption));
-                    let field = crate::ui_kit::canvas_value_field(ui, id, &mut entry.text, false);
+                    crate::ui_kit::canvas_value_field(ui, id, &mut entry.text, false);
                     ui.label(RichText::new(entry.unit()).color(t.text_dim).size(t.font_caption));
-                    apply = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 });
             });
         },
     );
     // A press inside this rectangle stays with the entry (its field), as the gnomon knows.
     f.entry_rect = Some(shown.response.rect);
-    // The field takes Escape for itself, so the entry drops the mode the entry was opened by.
-    let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
-    if escape {
+    // The global shortcuts run before the view, and egui drops a focused field's keyboard at the
+    // start of a frame when Escape is pressed. Keep the keyboard on the entry's field so Escape
+    // reaches this frame as the entry's own key instead of a dialog-cancelling shortcut.
+    ui.memory_mut(|memory| memory.set_focus_lock_filter(id, egui::EventFilter { escape: true, ..Default::default() }));
+    // The entry's field takes Enter and Escape for itself: they applied or dropped its value
+    // above, so they must not also submit or cancel the dialog that opened the gnomon.
+    if keys.dismiss {
         f.entry = None;
         f.entry_rect = None;
         f.end_click();
-    } else if apply {
+    } else if keys.apply {
         f.apply_entry(app);
     }
 }
@@ -656,6 +669,16 @@ fn entry_box(app: &SolveApp, ui: &mut egui::Ui, f: &mut DialogCamCoordinateSyste
 /// The dialog's rows: its name and the origin's three values. The frame is placed in the view —
 /// dragged, snapped by a click — so the form offers no alignment choice.
 fn coordinate_system_rows(app: &mut SolveApp, ui: &mut egui::Ui, f: &mut DialogCamCoordinateSystem) -> bool {
+    // The gnomon's floating value entry owned Enter and Escape this frame while its field held
+    // the keyboard: they applied or dropped the entry's value, so no row here — and neither the
+    // dialog's OK nor its Cancel — may act on them again.
+    let entry_owns_keys = f.gnomon.is_incremental_input_active();
+    if entry_owns_keys {
+        ui.input_mut(|input| {
+            input.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+        });
+    }
     let mut enter = crate::ui_kit::text_row(ui, "label.name", &mut f.name, "").0;
     // A drag in the view writes its origin here; typing here moves the frame.
     if f.refresh {
@@ -693,7 +716,7 @@ fn coordinate_system_rows(app: &mut SolveApp, ui: &mut egui::Ui, f: &mut DialogC
         .collect::<Vec<_>>()
         .join("   ");
     crate::ui_kit::status_line(ui, &readout, crate::ui_kit::StatusTone::Dim);
-    enter
+    enter && !entry_owns_keys
 }
 
 /// The command OK runs: the exact frame the gnomon holds.
@@ -732,7 +755,15 @@ fn coordinate_system_commands(f: &DialogCamCoordinateSystem) -> Result<Vec<(Stri
 /// handed to it each such frame.
 pub fn overlay(app: &mut SolveApp, ui: &mut egui::Ui, painter: &Painter, proj: &Proj, d: &mut Dialog) {
     let Kind::Cam(Zcam::CoordinateSystem(f)) = &mut d.kind else { return };
+    // The floating value entry's field owns Enter and Escape while it holds the keyboard: take
+    // them before the gnomon or the dialog can read them as a commit or a cancel.
+    let entry_keys = crate::dynamic_gnomon::take_incremental_keys(ui, entry_field_id(), f.entry.is_some());
+    f.gnomon.set_incremental_input_active(entry_keys.active);
     let mut input = InputState::read(ui);
+    if entry_keys.active {
+        // Escape drops the entry's value, never the click mode the entry was opened by.
+        input.escape = false;
+    }
     // Where the value entry sat last frame owns its own presses: the gnomon must not end the
     // click mode or start a drag behind it.
     f.gnomon.set_entry_rect(f.entry_rect);
@@ -764,7 +795,7 @@ pub fn overlay(app: &mut SolveApp, ui: &mut egui::Ui, painter: &Painter, proj: &
     f.follow_click();
     f.entry_rect = None;
     if let GnomonActiveState::RelativeInput { pos, .. } = f.gnomon.active_state() {
-        entry_box(app, ui, f, pos);
+        entry_box(app, ui, f, pos, entry_keys);
     }
     f.gnomon.draw(painter, proj, &Tokens::get());
 }

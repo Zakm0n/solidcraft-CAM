@@ -624,6 +624,73 @@ fn a_click_inside_the_value_entry_leaves_it_open() {
     assert!(f.entry.is_none(), "the entry closes with its mode");
 }
 
+/// #Z-CAM: Enter and Escape typed into the gnomon's floating value entry are the entry's own:
+/// they apply or drop its value, and the coordinate system dialog they float over neither
+/// commits on Enter nor closes on Escape.
+#[test]
+fn the_value_entry_keeps_enter_and_escape_from_the_dialog() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    app.home.open = false;
+    let dialog = crate::dialogs::Dialog::for_command(&app, "cam.coordinate_system.create").expect("the dialog opens");
+    app.dialog = Some(dialog);
+    let proj = gnomon_projection();
+    let ctx = crate::fonts::test_context();
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 900.0));
+    let frame = |app: &mut SolveApp, events: Vec<egui::Event>| {
+        let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+        crate::test_support::frame(&ctx, input, |ui| {
+            // The real frame's order: the global shortcuts, the view's gnomon, then the dialog.
+            crate::toolbar::shortcuts(app, &ctx);
+            let painter = ui.painter().clone();
+            if let Some(mut d) = app.dialog.take() {
+                if matches!(d.kind, Kind::Cam(Zcam::CoordinateSystem(_))) {
+                    overlay(app, ui, &painter, &proj, &mut d);
+                }
+                app.dialog = Some(d);
+            }
+            crate::dialogs::show(app, ui.ctx());
+        })
+    };
+    let open_entry = |app: &mut SolveApp, text: &str| {
+        let mut d = app.dialog.take().expect("the dialog is open");
+        let Kind::Cam(Zcam::CoordinateSystem(f)) = &mut d.kind else { panic!("the dialog's kind") };
+        // A rect from an earlier entry must not swallow this press.
+        f.gnomon.set_entry_rect(None);
+        let shaft = on_arm(&f.gnomon, &proj, Axis::Y, GnomonHandle::Translate(Axis::Y));
+        click(&mut f.gnomon, &proj, shaft);
+        f.follow_click();
+        f.entry.as_mut().expect("a shaft's click opens its value entry").text = text.into();
+        app.dialog = Some(d);
+    };
+    // The dialog's own first frames give its form the keyboard; the entry opens after that.
+    frame(&mut app, Vec::new());
+    frame(&mut app, Vec::new());
+    open_entry(&mut app, "5");
+    // The entry's field asks for the keyboard as it opens; these frames put the keyboard in it.
+    frame(&mut app, Vec::new());
+    frame(&mut app, Vec::new());
+    assert_eq!(ctx.memory(|m| m.focused()), Some(entry_field_id()), "the entry's field holds the keyboard");
+    // Enter applies 5 mm along +Y and leaves the dialog open.
+    frame(&mut app, crate::test_support::key(egui::Key::Enter));
+    {
+        let d = app.dialog.as_ref().expect("Enter in the entry does not submit the dialog");
+        let Kind::Cam(Zcam::CoordinateSystem(f)) = &d.kind else { panic!("the dialog's kind") };
+        assert!(f.entry.is_none(), "Enter applies the entry's value");
+        assert!((f.gnomon.origin().y - 5.0).abs() < 1e-9, "5 mm along +Y: {:?}", f.gnomon.origin());
+    }
+    // Escape drops the entry without turning the frame and without closing the dialog.
+    open_entry(&mut app, "9");
+    frame(&mut app, Vec::new());
+    frame(&mut app, Vec::new());
+    frame(&mut app, crate::test_support::key(egui::Key::Escape));
+    assert!(app.dialog.is_some(), "Escape in the entry does not cancel the dialog");
+    assert!(!app.esc_handled, "the dialog never saw the entry's Escape");
+    let d = app.dialog.as_ref().expect("the dialog stays open");
+    let Kind::Cam(Zcam::CoordinateSystem(f)) = &d.kind else { panic!("the dialog's kind") };
+    assert!(f.entry.is_none(), "Escape drops the entry");
+    assert!((f.gnomon.origin().y - 5.0).abs() < 1e-9, "Escape moves nothing: {:?}", f.gnomon.origin());
+}
+
 /// #Z-CAM: the gnomon's handles are strictly separated: walking out along an arm, the ball takes
 /// the presses nearest the origin, the shaft the line between, and the cone only the arrowhead at
 /// the tip, with no region of one inside another.

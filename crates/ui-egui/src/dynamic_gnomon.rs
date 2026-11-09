@@ -179,6 +179,34 @@ pub struct InputState {
     pub escape: bool,
 }
 
+/// The keyboard the floating incremental value entry took for itself this frame: Enter applies
+/// its value and Escape drops it, so the dialog that opened the gnomon never reads them as its
+/// own OK or Cancel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IncrementalKeys {
+    /// The entry's field held the keyboard, so Enter and Escape were the entry's own.
+    pub active: bool,
+    /// Enter was pressed: apply the entry's value.
+    pub apply: bool,
+    /// Escape was pressed: drop the entry without changing the frame.
+    pub dismiss: bool,
+}
+
+/// Take this frame's Enter and Escape for the caller's floating incremental value entry while
+/// its field holds the keyboard, so the dialog that opened the gnomon never reads them as its
+/// own OK or Cancel. `open` says whether the entry is showing: a closed entry takes nothing.
+/// Escape drops the keyboard at the start of a frame and Enter on a single-line field surrenders
+/// it, so the field's focus now or last frame names the entry that owned the keys.
+pub fn take_incremental_keys(ui: &egui::Ui, field: egui::Id, open: bool) -> IncrementalKeys {
+    if !open || !ui.memory(|memory| memory.has_focus(field) || memory.had_focus_last_frame(field)) {
+        return IncrementalKeys::default();
+    }
+    let (apply, dismiss) = ui.input_mut(|input| {
+        (input.consume_key(egui::Modifiers::NONE, egui::Key::Enter), input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+    });
+    IncrementalKeys { active: true, apply, dismiss }
+}
+
 impl InputState {
     /// This frame's pointer state from `ui`.
     pub fn read(ui: &egui::Ui) -> InputState {
@@ -276,6 +304,9 @@ pub struct DynamicGnomon {
     /// inside it belongs to the entry's own widgets, so it neither starts a drag nor ends the
     /// click mode the entry was opened by.
     entry_rect: Option<egui::Rect>,
+    /// Whether the caller's floating incremental value entry took the keyboard this frame, so
+    /// Enter and Escape were the entry's own and not the dialog's.
+    incremental_input_active: bool,
     /// Where the click mode began, while Origin Snap or Axis Orbit follows the pointer.
     snap_base: Option<SnapBase>,
     /// The points a live snap may take.
@@ -296,6 +327,7 @@ impl Default for DynamicGnomon {
             drag: None,
             state: GnomonActiveState::Idle,
             entry_rect: None,
+            incremental_input_active: false,
             snap_base: None,
             candidates: Vec::new(),
             snap_at: None,
@@ -421,6 +453,19 @@ impl DynamicGnomon {
     /// Whether `p` lies on the floating value entry the caller draws, which owns its own presses.
     fn on_entry(&self, p: Pos2) -> bool {
         self.entry_rect.is_some_and(|r| r.contains(p))
+    }
+
+    /// Whether the caller's floating incremental value entry took the keyboard this frame
+    /// ([`take_incremental_keys`]), so Enter and Escape were the entry's own and not the
+    /// dialog's OK or Cancel.
+    pub fn is_incremental_input_active(&self) -> bool {
+        self.incremental_input_active
+    }
+
+    /// Say whether the incremental value entry took the keyboard this frame. The dialog that
+    /// opened the gnomon asks this before it reads Enter or Escape as its own.
+    pub fn set_incremental_input_active(&mut self, active: bool) {
+        self.incremental_input_active = active;
     }
 
     /// Whether a drag is in progress.
