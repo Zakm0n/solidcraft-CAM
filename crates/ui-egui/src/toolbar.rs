@@ -1371,7 +1371,7 @@ fn ribbon_tabs(app: &mut SolveApp, ui: &mut egui::Ui, row: Rect) -> Option<bool>
     // A plus after the last tab opens the toolbar's menu, so tabs can be shown or hidden without
     // knowing about the right-click; it stays when every tab is hidden. The Render and CAM
     // workspaces own their tabs, so they can't be hidden.
-    let add = !crate::render_workspace::active(app) && !crate::workspace::cam_tab(&app.ui.tab);
+    let add = !crate::render_workspace::active(app) && !crate::workspace::in_cam(app);
     let add_size = TAB_ROW_HEIGHT - 2.0 * RIBBON_TAB_INSET;
     let tabs_width: f32 = widths.iter().sum::<f32>()
         + tabs.len().saturating_sub(1) as f32 * 2.0
@@ -1697,7 +1697,7 @@ fn ribbon_contents(app: &mut SolveApp, ui: &mut egui::Ui, shape: RibbonShape) ->
             t.secondary_line(&painter, [ws.right_top(), ws.right_bottom()], t.border);
         }
         let render = crate::render_workspace::active(app);
-        let cam = crate::workspace::cam_tab(&app.ui.tab);
+        let cam = crate::workspace::in_cam(app);
         let workspace_name = if render {
             app.tr("ui.render")
         } else if cam {

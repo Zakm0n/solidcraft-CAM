@@ -450,7 +450,7 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
         Target::Timeline { feature } => crate::timeline::feature_items(app, *feature),
         Target::Workspace => {
             let rendering = crate::render_workspace::active(app);
-            let cam = crate::workspace::cam_tab(&app.ui.tab);
+            let cam = crate::workspace::in_cam(app);
             // Render and CAM need no sketch, tool or dialog to be open.
             let ready = app.session.active_sketch.is_none() && app.tool.is_none() && app.dialog.is_none() && !app.file_load.busy();
             vec![

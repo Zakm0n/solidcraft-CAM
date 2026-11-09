@@ -54,21 +54,37 @@ impl Workspace {
 pub fn current(app: &crate::SolveApp) -> Workspace {
     if crate::render_workspace::active(app) {
         Workspace::Render
-    } else if cam_tab(&app.ui.tab) {
+    } else if in_cam(app) {
         Workspace::Cam
     } else {
         Workspace::Design
     }
 }
 
+/// Is the CAM workspace open? Its Toolpath tab owns the ribbon, and a sketch opened from CAM
+/// takes the contextual SKETCH tab while keeping `TOOLPATH` in `sketch_return_tab` as the way
+/// back: the app stays in the CAM workspace until that sketch is finished.
+pub fn in_cam(app: &crate::SolveApp) -> bool {
+    cam_tab(&app.ui.tab) || (app.ui.tab == "SKETCH" && app.ui.sketch_return_tab.as_deref().is_some_and(cam_tab))
+}
+
 /// Enter a workspace. Render and CAM need no running sketch, tool or dialog, and keep their own
 /// silent 3D view; Design returns to the Model tab.
 pub fn enter(app: &mut crate::SolveApp, workspace: Workspace) -> Result<(), String> {
     match workspace {
-        Workspace::Design => crate::render_workspace::enter(app, false),
+        Workspace::Design => {
+            crate::render_workspace::enter(app, false)?;
+            // A sketch opened in CAM belongs to CAM: leaving for Design forgets the CAM tab it
+            // would return to, so the Design ribbon keeps the sketch's contextual tab.
+            if app.ui.sketch_return_tab.as_deref().is_some_and(cam_tab) {
+                app.ui.sketch_return_tab = None;
+                app.ui.ribbon_context = None;
+            }
+            Ok(())
+        }
         Workspace::Render => crate::render_workspace::enter(app, true),
         Workspace::Cam => {
-            if cam_tab(&app.ui.tab) {
+            if in_cam(app) {
                 return Ok(());
             }
             if app.session.active_sketch.is_some() || app.tool.is_some() || app.dialog.is_some() || app.file_load.busy() {
@@ -757,8 +773,14 @@ pub fn visible_tabs(app: &crate::SolveApp) -> Vec<&'static str> {
     if crate::render_workspace::active(app) {
         return Vec::new();
     }
-    if cam_tab(&app.ui.tab) {
-        return CAM_TABS.to_vec();
+    if in_cam(app) {
+        // The CAM workspace owns the ribbon; the contextual SKETCH tab joins its Toolpath tab
+        // while a sketch is open, so the sketch's tools stay reachable without leaving CAM.
+        let mut tabs = CAM_TABS.to_vec();
+        if app.session.active_sketch.is_some() {
+            tabs.push("SKETCH");
+        }
+        return tabs;
     }
     let mut tabs: Vec<_> = TABS.iter().copied().filter(|tab| tab_turned_on(app, tab)).collect();
     if app.preferences.sketch_tab_always {
@@ -794,7 +816,11 @@ pub fn starts_a_sketch(app: &crate::SolveApp, id: &str) -> bool {
 /// other tabs to remain usable for the rest of that context. Sketch takes precedence over sheet
 /// metal, and sheet metal over weldments.
 pub fn sync_context(app: &mut crate::SolveApp) {
-    if crate::render_workspace::active(app) || cam_tab(&app.ui.tab) {
+    if crate::render_workspace::active(app) {
+        return;
+    }
+    if in_cam(app) {
+        sync_cam_context(app);
         return;
     }
     let context = app
@@ -833,6 +859,31 @@ pub fn sync_context(app: &mut crate::SolveApp) {
     }
     if !visible_tabs(app).contains(&app.ui.tab.as_str()) {
         app.ui.tab = home_tab(app).into();
+    }
+}
+
+/// The CAM workspace's contextual tab: opening a sketch from CAM selects the SKETCH tab, and
+/// finishing it returns to the Toolpath tab, as a design sketch returns to the tab it started
+/// from (#3250). The other CAM tabs stay usable while the sketch is open.
+fn sync_cam_context(app: &mut crate::SolveApp) {
+    let context = app.session.active_sketch.map(|id| format!("sketch:{id}"));
+    if app.ui.ribbon_context == context {
+        return;
+    }
+    if app.session.active_sketch.is_some() {
+        if app.ui.tab != "SKETCH" {
+            // Remember the CAM tab the sketch was started from.
+            app.ui.sketch_return_tab = Some(CAM_TABS[0].to_string());
+            app.ui.tab = "SKETCH".into();
+        }
+    } else if app.ui.tab == "SKETCH" {
+        // The sketch is finished: back to the CAM tab.
+        app.ui.sketch_return_tab = None;
+        app.ui.tab = CAM_TABS[0].into();
+    }
+    app.ui.ribbon_context = context;
+    if !visible_tabs(app).contains(&app.ui.tab.as_str()) {
+        app.ui.tab = CAM_TABS[0].into();
     }
 }
 
@@ -1599,5 +1650,36 @@ mod tests {
         assert_eq!(output, ["cam.export.gcode"], "Output offers the G-code export");
         assert_eq!(h.call("ui.workspace", json!({"workspace":"design"}))["result"]["workspace"], "design");
         assert_eq!(h.app.ui.tab, "MODEL");
+    }
+
+    /// A sketch opened from the CAM workspace takes the contextual SKETCH tab beside Toolpath and
+    /// finishing it goes back to Toolpath: CAM stays the workspace throughout.
+    #[test]
+    fn cam_workspace_shows_and_selects_the_sketch_tab_while_a_sketch_is_open() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.run("sketch.create", json!({"plane": "XY"})).unwrap();
+        h.app.run("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]})).unwrap();
+        h.app.run("sketch.finish", json!({})).unwrap();
+        h.frames(2);
+        assert_eq!(h.call("ui.workspace", json!({"workspace":"cam"}))["result"]["workspace"], "cam");
+        h.frames(2);
+        assert_eq!(current(&h.app), Workspace::Cam);
+        assert_eq!(visible_tabs(&h.app), CAM_TABS, "no Sketch tab until a sketch is open");
+
+        let sketch =
+            h.app.session.doc.features.iter().find(|f| matches!(f.kind, FeatureKind::Sketch { .. })).map(|f| f.id).expect("the design has a sketch");
+        h.app.edit_sketch_in(sketch, None);
+        h.frames(2);
+        assert!(h.app.session.active_sketch.is_some());
+        assert_eq!(current(&h.app), Workspace::Cam, "editing a sketch stays in CAM");
+        assert_eq!(h.app.ui.tab, "SKETCH", "the Sketch tab selects itself");
+        assert_eq!(visible_tabs(&h.app), ["TOOLPATH", "SKETCH"]);
+
+        h.app.finish_sketch();
+        h.frames(2);
+        assert!(h.app.session.active_sketch.is_none());
+        assert_eq!(current(&h.app), Workspace::Cam);
+        assert_eq!(h.app.ui.tab, "TOOLPATH", "finishing returns to the CAM tab");
+        assert_eq!(visible_tabs(&h.app), CAM_TABS);
     }
 }
