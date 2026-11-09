@@ -2350,6 +2350,22 @@ fn a_coordinate_system_menu_edits_renames_and_hides_it() {
     assert_eq!(form.editing(), Some(id), "OK runs cam.coordinate_system.edit on this system");
 }
 
+/// #Z-CAM: Convert to Named View saves `CS:<name>`, appending ` (1)`, ` (2)`, … when the name is
+/// already taken, and leaves the coordinate system itself in place.
+#[test]
+fn converting_a_coordinate_system_to_a_named_view_keeps_it_and_counts_duplicates() {
+    let mut s = Session::default();
+    let id = s.execute("cam.coordinate_system.create", &json!({"name": "Top"})).unwrap()["coordinate_system"].as_u64().unwrap();
+    let mut app = SolveApp::new(s, Services::default());
+    for _ in 0..3 {
+        crate::browser::coordinate_system_named_view(&mut app, id);
+    }
+    let names: Vec<&str> = app.session.doc.named_views.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["CS:Top", "CS:Top (1)", "CS:Top (2)"]);
+    assert_eq!(app.session.doc.coordinate_systems.len(), 1, "the coordinate system stays");
+    assert_eq!(app.session.doc.coordinate_systems[0].id, id);
+}
+
 /// A coordinate system a setup works from cannot be deleted: its menu says why.
 #[test]
 fn a_coordinate_system_a_setup_works_from_cannot_be_deleted() {

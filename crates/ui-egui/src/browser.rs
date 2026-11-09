@@ -2306,15 +2306,28 @@ pub fn coordinate_system_from_plane(app: &mut SolveApp, feature: u64) {
 }
 
 /// Save the current camera as a named view that looks along the coordinate system's Z, with its
-/// X across the screen: the view a part is machined from.
+/// X across the screen: the view a part is machined from. The view is named `CS:<name>`, with
+/// ` (1)`, ` (2)`, … appended when that name is taken; the coordinate system itself stays.
 pub fn coordinate_system_named_view(app: &mut SolveApp, id: u64) {
     let Some(cs) = app.session.doc.coordinate_systems.iter().find(|c| c.id == id) else { return };
     let camera = camera_along(&app.cam, cs);
-    let name = cs.name.clone();
-    if app.run("view.save", json!({ "view": name, "camera": camera })).is_ok() {
+    let name = coordinate_system_view_name(&app.session.doc, &cs.name);
+    if app.run("view.save", json!({ "name": name, "camera": camera })).is_ok() {
         app.tree.collapsed.remove("namedviews");
         app.tree.expanded.insert("namedviews".into());
     }
+}
+
+/// The first free named-view name for a coordinate system: `CS:<name>`, then `CS:<name> (1)`,
+/// `CS:<name> (2)`, … so converting the same coordinate system twice never replaces a view.
+fn coordinate_system_view_name(doc: &solidcraft_engine::doc::Document, cs_name: &str) -> String {
+    let mut name = format!("CS:{cs_name}");
+    let mut counter = 1;
+    while doc.named_views.iter().any(|v| v.name == name) {
+        name = format!("CS:{cs_name} ({counter})");
+        counter += 1;
+    }
+    name
 }
 
 /// A camera looking along the coordinate system's own −Z at its origin, with its +X across the

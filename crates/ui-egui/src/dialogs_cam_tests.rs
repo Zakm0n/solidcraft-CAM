@@ -591,6 +591,39 @@ fn the_value_entry_moves_the_frame_or_turns_it() {
     assert_eq!(f.gnomon.origin(), Vec3::new(5.0, 0.0, 0.0));
 }
 
+/// #Z-CAM: the floating value entry opens empty with the keyboard in its field, and a press
+/// inside it belongs to its field, so it stays open; only a press outside it ends it (Enter and
+/// Escape are handled by the field itself).
+#[test]
+fn a_click_inside_the_value_entry_leaves_it_open() {
+    let app = SolveApp::new(Session::default(), Services::default());
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.coordinate_system.create").expect("the dialog opens");
+    let Kind::Cam(Zcam::CoordinateSystem(f)) = &mut d.kind else { panic!("the dialog's kind") };
+    let proj = gnomon_projection();
+    let shaft = on_arm(&f.gnomon, &proj, Axis::Y, GnomonHandle::Translate(Axis::Y));
+    click(&mut f.gnomon, &proj, shaft);
+    f.follow_click();
+    let entry = f.entry.as_ref().expect("a shaft's click opens its value entry");
+    assert!(entry.text.is_empty(), "the entry starts empty: {:?}", entry.text);
+    assert!(entry.focus, "the entry's field asks for the keyboard as it opens");
+    // A press inside the entry's own rectangle belongs to its field, not to the gnomon or a pick.
+    let rect = egui::Rect::from_min_size(shaft + egui::vec2(8.0, 8.0), egui::vec2(90.0, 28.0));
+    f.entry_rect = Some(rect);
+    f.gnomon.set_entry_rect(f.entry_rect);
+    let inside = rect.center();
+    f.gnomon.interact(&proj, &InputState { pointer: Some(inside), primary_pressed: true, primary_down: true, ..InputState::default() });
+    f.gnomon.interact(&proj, &InputState { pointer: Some(inside), primary_released: true, ..InputState::default() });
+    assert!(matches!(f.gnomon.active_state(), GnomonActiveState::RelativeInput { .. }), "a press inside the entry keeps it open");
+    f.follow_click();
+    assert!(f.entry.is_some(), "the entry stays open");
+    // A press outside the entry ends it.
+    let outside = proj.rect.left_top() + egui::vec2(5.0, 5.0);
+    f.gnomon.interact(&proj, &InputState { pointer: Some(outside), primary_pressed: true, primary_down: true, ..InputState::default() });
+    f.follow_click();
+    assert_eq!(f.gnomon.active_state(), GnomonActiveState::Idle, "a click outside the entry drops it");
+    assert!(f.entry.is_none(), "the entry closes with its mode");
+}
+
 /// #Z-CAM: the gnomon's handles are strictly separated: walking out along an arm, the ball takes
 /// the presses nearest the origin, the shaft the line between, and the cone only the arrowhead at
 /// the tip, with no region of one inside another.

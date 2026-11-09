@@ -237,6 +237,10 @@ pub struct DynamicGnomon {
     align_mode: GnomonAlignMode,
     drag: Option<DragState>,
     state: GnomonActiveState,
+    /// The screen rectangle of the caller's floating value entry, while one is open. A press
+    /// inside it belongs to the entry's own widgets, so it neither starts a drag nor ends the
+    /// click mode the entry was opened by.
+    entry_rect: Option<egui::Rect>,
 }
 
 impl Default for DynamicGnomon {
@@ -250,6 +254,7 @@ impl Default for DynamicGnomon {
             align_mode: GnomonAlignMode::Free,
             drag: None,
             state: GnomonActiveState::Idle,
+            entry_rect: None,
         }
     }
 }
@@ -320,6 +325,18 @@ impl DynamicGnomon {
     /// been taken, so each click mode acts once.
     pub fn set_active_state(&mut self, state: GnomonActiveState) {
         self.state = state;
+    }
+
+    /// Say where the caller's floating value entry sits, while one is open, so a press inside it
+    /// stays with the entry instead of ending the click mode ([`GnomonActiveState::RelativeInput`]).
+    /// `None` once the entry closes.
+    pub fn set_entry_rect(&mut self, rect: Option<egui::Rect>) {
+        self.entry_rect = rect;
+    }
+
+    /// Whether `p` lies on the floating value entry the caller draws, which owns its own presses.
+    fn on_entry(&self, p: Pos2) -> bool {
+        self.entry_rect.is_some_and(|r| r.contains(p))
     }
 
     /// Whether a drag is in progress.
@@ -497,9 +514,12 @@ impl DynamicGnomon {
             return change;
         }
         let pointer = input.pointer.filter(|p| finite_screen(*p) && proj.rect.contains(*p));
-        self.hovered_handle = pointer.map_or(GnomonHandle::None, |p| self.hit(proj, p));
+        // A press on the caller's value entry belongs to that entry: it must not end the mode the
+        // entry was opened by, nor start a drag behind the entry.
+        self.hovered_handle = pointer.filter(|p| !self.on_entry(*p)).map_or(GnomonHandle::None, |p| self.hit(proj, p));
         if input.primary_pressed
             && let Some(p) = pointer
+            && !self.on_entry(p)
         {
             let handle = self.hit(proj, p);
             if handle != GnomonHandle::None {

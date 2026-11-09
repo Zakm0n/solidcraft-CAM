@@ -291,11 +291,8 @@ impl DialogCamSetup {
     }
 }
 
-/// The alignment modes' labels, in [`GnomonAlignMode::ALL`] order.
-const ALIGN_LABELS: [&str; 4] = ["label.align_free", "label.snap_origin", "label.align_z_to_face", "label.align_x_edge"];
-
 /// A machining origin being placed (`cam.coordinate_system.create`): a dynamic gnomon the user
-/// drags and aligns to B-rep geometry in the view, and its origin typed exactly.
+/// drags and snaps to B-rep geometry in the view, and its origin typed exactly.
 #[derive(Clone, Debug)]
 pub struct DialogCamCoordinateSystem {
     /// The frame the view draws and drags: its origin, +X and +Z (Y is Z × X).
@@ -316,6 +313,9 @@ pub struct DialogCamCoordinateSystem {
     /// The value a click on an arm the frame draws or on a wheel opened, and that handle. Boxed:
     /// the entry is open only while its field is, and the dialog is in a small enum.
     entry: Option<Box<RelativeEntry>>,
+    /// The screen rectangle the entry was drawn in last frame, handed to the gnomon so a press
+    /// inside the entry stays with it. `None` while no entry is open.
+    entry_rect: Option<egui::Rect>,
     /// The click mode the gnomon showed last frame, so a new one opens its value entry once.
     seen: GnomonActiveState,
 }
@@ -327,7 +327,8 @@ struct RelativeEntry {
     /// The handle clicked: a shaft ([`GnomonHandle::Translate`]) or a wheel
     /// ([`GnomonHandle::Rotate`]).
     handle: GnomonHandle,
-    /// The value as typed, in mm or in degrees.
+    /// The value as typed, in mm or in degrees. Empty as the entry opens, so the field starts
+    /// zeroed rather than showing a value the user did not ask for.
     text: String,
     /// The field still needs the keyboard: true as the entry opens, cleared once it has it.
     focus: bool,
@@ -372,6 +373,7 @@ impl DialogCamCoordinateSystem {
             refresh: false,
             editing: None,
             entry: None,
+            entry_rect: None,
             seen: GnomonActiveState::Idle,
         }
     }
@@ -558,14 +560,20 @@ impl DialogCamCoordinateSystem {
 }
 
 /// The floating value entry a click on a shaft or a wheel opens, at `at` where the click was: its
-/// label and unit, and the keyboard in its field. Enter applies it.
+/// label and unit, and the keyboard in its field. Enter applies it, Escape drops it, and a click
+/// anywhere outside it ends it; a click inside it belongs to its own field, so it stays open.
 fn entry_box(app: &SolveApp, ui: &mut egui::Ui, f: &mut DialogCamCoordinateSystem, at: Pos2) {
     let Some(entry) = f.entry.as_mut() else { return };
     let t = Tokens::get();
     let area = egui::Id::unique("zcam_gnomon_entry");
     let id = egui::Id::unique("zcam_gnomon_entry_value");
     let mut apply = false;
-    Container::new(ui.ctx(), Surface::Canvas).area(area).fixed_pos(at + egui::vec2(t.space_8, t.space_8)).order(egui::Order::Foreground).show(
+    // The entry opens empty and takes the keyboard at once, so typing goes straight into it.
+    let focus = std::mem::take(&mut entry.focus);
+    if focus {
+        ui.memory_mut(|mem| mem.request_focus(id));
+    }
+    let shown = Container::new(ui.ctx(), Surface::Canvas).area(area).fixed_pos(at + egui::vec2(t.space_8, t.space_8)).order(egui::Order::Foreground).show(
         ui.ctx(),
         |ui| {
             let frame = Container::popup_frame(ui.style()).inner_margin(egui::Margin::symmetric(6, 3));
@@ -573,30 +581,29 @@ fn entry_box(app: &SolveApp, ui: &mut egui::Ui, f: &mut DialogCamCoordinateSyste
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(entry.label()).color(t.text_dim).size(t.font_caption));
                     let field = crate::ui_kit::canvas_value_field(ui, id, &mut entry.text, false);
-                    if std::mem::take(&mut entry.focus) {
-                        field.request_focus();
-                    }
                     ui.label(RichText::new(entry.unit()).color(t.text_dim).size(t.font_caption));
                     apply = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 });
             });
         },
     );
-    if apply {
+    // A press inside this rectangle stays with the entry (its field), as the gnomon knows.
+    f.entry_rect = Some(shown.response.rect);
+    // The field takes Escape for itself, so the entry drops the mode the entry was opened by.
+    let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    if escape {
+        f.entry = None;
+        f.entry_rect = None;
+        f.end_click();
+    } else if apply {
         f.apply_entry(app);
     }
 }
 
-/// The dialog's rows: its name, the alignment mode, and the origin's three values.
+/// The dialog's rows: its name and the origin's three values. The frame is placed in the view —
+/// dragged, snapped by a click — so the form offers no alignment choice.
 fn coordinate_system_rows(app: &mut SolveApp, ui: &mut egui::Ui, f: &mut DialogCamCoordinateSystem) -> bool {
     let mut enter = crate::ui_kit::text_row(ui, "label.name", &mut f.name, "").0;
-    let labels: Vec<&str> = ALIGN_LABELS.iter().map(|l| crate::i18n::tr_label(l)).collect();
-    let mut mode = GnomonAlignMode::ALL.iter().position(|m| *m == f.gnomon.align_mode()).unwrap_or(0);
-    if crate::ui_kit::choice_row(ui, "label.alignment", "cam_cs_align", &mut mode, &labels).changed()
-        && let Some(m) = GnomonAlignMode::ALL.get(mode)
-    {
-        f.gnomon.set_align_mode(*m);
-    }
     // A drag in the view writes its origin here; typing here moves the frame.
     if f.refresh {
         f.sync_fields(&app.session.doc);
@@ -671,6 +678,9 @@ fn coordinate_system_commands(f: &DialogCamCoordinateSystem) -> Result<Vec<(Stri
 pub fn overlay(app: &mut SolveApp, ui: &mut egui::Ui, painter: &Painter, proj: &Proj, d: &mut Dialog) {
     let Kind::Cam(Zcam::CoordinateSystem(f)) = &mut d.kind else { return };
     let input = InputState::read(ui);
+    // Where the value entry sat last frame owns its own presses: the gnomon must not end the
+    // click mode or start a drag behind it.
+    f.gnomon.set_entry_rect(f.entry_rect);
     // The pick is this view's click on geometry, never the picks of an older mode or a drag. It
     // comes before this frame's press, so the click that takes a snap does not first end the mode
     // it snaps in.
@@ -685,6 +695,7 @@ pub fn overlay(app: &mut SolveApp, ui: &mut egui::Ui, painter: &Painter, proj: &
     // What a click on the ball, a cone, a shaft or a wheel asked for: a snap mode, an orbit mode,
     // or the floating value entry it sits at.
     f.follow_click();
+    f.entry_rect = None;
     if let GnomonActiveState::RelativeInput { pos, .. } = f.gnomon.active_state() {
         entry_box(app, ui, f, pos);
     }
