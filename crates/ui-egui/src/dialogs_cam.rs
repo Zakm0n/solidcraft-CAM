@@ -493,7 +493,14 @@ impl DialogCamCoordinateSystem {
                 self.entry = None;
             }
             GnomonActiveState::RelativeInput { handle, .. } => self.entry = Some(Box::new(RelativeEntry { handle, text: String::new(), focus: true })),
-            GnomonActiveState::Idle | GnomonActiveState::AxisOrbit(_) => self.entry = None,
+            GnomonActiveState::AxisOrbit(_) => self.entry = None,
+            GnomonActiveState::Idle => {
+                // A snap mode dropped by a second click on its handle leaves no alignment behind.
+                if self.seen == GnomonActiveState::OriginSnap {
+                    self.gnomon.set_align_mode(GnomonAlignMode::Free);
+                }
+                self.entry = None;
+            }
         }
         self.seen = state;
     }
@@ -687,11 +694,22 @@ pub fn overlay(app: &mut SolveApp, ui: &mut egui::Ui, painter: &Painter, proj: &
 /// Whether the open coordinate system dialog's gnomon has a handle under `p`: a press there
 /// drags the frame, not the camera, and picks nothing in the model.
 pub(crate) fn gnomon_owns(app: &SolveApp, proj: &Proj, p: Pos2) -> bool {
-    let gnomon = app.dialog.as_ref().and_then(|d| match &d.kind {
+    gnomon(app).is_some_and(|g| g.contains_pointer(proj, p))
+}
+
+/// Whether the open coordinate system dialog's gnomon owns the pointer, so the viewport must not
+/// start its drag-selection marquee: a handle is hovered, the frame is dragged, or a click mode
+/// waits for its pick.
+pub(crate) fn gnomon_blocks_marquee(app: &SolveApp) -> bool {
+    gnomon(app).is_some_and(|g| g.blocks_viewport_marquee())
+}
+
+/// The gnomon of the open coordinate system dialog, if that is the open dialog.
+fn gnomon(app: &SolveApp) -> Option<&DynamicGnomon> {
+    match &app.dialog.as_ref()?.kind {
         Kind::Cam(Zcam::CoordinateSystem(f)) => Some(&f.gnomon),
         _ => None,
-    });
-    gnomon.is_some_and(|g| g.contains_pointer(proj, p))
+    }
 }
 
 /// Move or turn `f`'s frame to what `sel` is: a point for its origin, a planar face's normal for

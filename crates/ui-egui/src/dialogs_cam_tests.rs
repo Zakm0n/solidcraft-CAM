@@ -590,3 +590,76 @@ fn the_value_entry_moves_the_frame_or_turns_it() {
     assert!(f.entry.is_some(), "an unreadable value keeps the entry open");
     assert_eq!(f.gnomon.origin(), Vec3::new(5.0, 0.0, 0.0));
 }
+
+/// #Z-CAM: the gnomon's handles are strictly separated: walking out along an arm, the ball takes
+/// the presses nearest the origin, the shaft the line between, and the cone only the arrowhead at
+/// the tip, with no region of one inside another.
+#[test]
+fn the_ball_the_shaft_and_the_cone_never_steal_each_others_clicks() {
+    let proj = gnomon_projection();
+    let g = DynamicGnomon::default();
+    let centre = origin_on_screen(&g, &proj);
+    let d = direction_on_screen(&g, &proj, Vec3::X);
+    let walked: Vec<(f32, GnomonHandle)> = (0..=110).map(|r| (r as f32, g.handle_at(&proj, centre + d * r as f32))).collect();
+    let first = |want: GnomonHandle| walked.iter().position(|(_, h)| *h == want);
+    let (origin, shaft, cone) = (first(GnomonHandle::Origin), first(GnomonHandle::Translate(Axis::X)), first(GnomonHandle::Cone(Axis::X)));
+    let (Some(origin), Some(shaft), Some(cone)) = (origin, shaft, cone) else { panic!("the arm shows a ball, a shaft and a cone: {walked:?}") };
+    assert!(origin < shaft && shaft < cone, "the regions run origin, shaft, cone: {walked:?}");
+    assert!(walked[..origin].iter().all(|(_, h)| *h == GnomonHandle::None), "nothing comes before the ball: {walked:?}");
+    // Past the first cone point the shaft never returns: the arrowhead owns its tip outright.
+    assert!(
+        !walked[cone..].iter().any(|(_, h)| *h == GnomonHandle::Translate(Axis::X)),
+        "no shaft press inside the arrowhead: {walked:?}"
+    );
+    assert!(walked[cone..].iter().any(|(_, h)| *h == GnomonHandle::Cone(Axis::X)), "the arrowhead takes its tip");
+}
+
+/// #Z-CAM: a click on the handle that opened a snap mode drops it again, so the cone's Axis
+/// Orbit and the ball's Origin Snap toggle on and off; a click in the empty view also drops one.
+#[test]
+fn a_snap_mode_toggles_on_and_off() {
+    let proj = gnomon_projection();
+    let mut g = DynamicGnomon::default();
+    let centre = origin_on_screen(&g, &proj);
+    click(&mut g, &proj, centre);
+    assert_eq!(g.active_state(), GnomonActiveState::OriginSnap);
+    click(&mut g, &proj, centre);
+    assert_eq!(g.active_state(), GnomonActiveState::Idle, "a second click on the ball drops Origin Snap");
+    let cone = on_arm(&g, &proj, Axis::X, GnomonHandle::Cone(Axis::X));
+    click(&mut g, &proj, cone);
+    assert_eq!(g.active_state(), GnomonActiveState::AxisOrbit(Axis::X));
+    click(&mut g, &proj, cone);
+    assert_eq!(g.active_state(), GnomonActiveState::Idle, "a second click on the cone drops Axis Orbit");
+    // Another cone switches the axis rather than dropping the mode.
+    click(&mut g, &proj, cone);
+    let other = on_arm(&g, &proj, Axis::Z, GnomonHandle::Cone(Axis::Z));
+    click(&mut g, &proj, other);
+    assert_eq!(g.active_state(), GnomonActiveState::AxisOrbit(Axis::Z), "another cone orbits another axis");
+    // A click in the empty view drops the mode.
+    let empty = proj.rect.left_top() + egui::vec2(5.0, 5.0);
+    g.interact(&proj, &InputState { pointer: Some(empty), primary_pressed: true, primary_down: true, ..InputState::default() });
+    assert_eq!(g.active_state(), GnomonActiveState::Idle, "a click in the view drops the snap mode");
+}
+
+/// #Z-CAM: the frame tells the viewport when the marquee must not start: a handle is hovered, a
+/// drag is in progress, or a snap mode waits for its pick.
+#[test]
+fn the_gnomon_blocks_the_viewport_marquee() {
+    let proj = gnomon_projection();
+    let mut g = DynamicGnomon::default();
+    let empty = proj.rect.left_top() + egui::vec2(5.0, 5.0);
+    assert!(!g.blocks_viewport_marquee(), "a frame the pointer is away from blocks nothing");
+    let shaft = on_arm(&g, &proj, Axis::Y, GnomonHandle::Translate(Axis::Y));
+    g.interact(&proj, &InputState { pointer: Some(shaft), ..InputState::default() });
+    assert!(g.blocks_viewport_marquee(), "a hovered handle blocks the marquee");
+    g.interact(&proj, &InputState { pointer: Some(empty), ..InputState::default() });
+    assert!(!g.blocks_viewport_marquee(), "the empty view leaves the marquee to the viewport");
+    let centre = origin_on_screen(&g, &proj);
+    click(&mut g, &proj, centre);
+    g.interact(&proj, &InputState { pointer: Some(empty), ..InputState::default() });
+    assert_eq!(g.active_state(), GnomonActiveState::OriginSnap);
+    assert!(g.blocks_viewport_marquee(), "a snap mode waiting for its pick blocks the marquee");
+    g.interact(&proj, &InputState { escape: true, ..InputState::default() });
+    press(&mut g, &proj, shaft);
+    assert!(g.blocks_viewport_marquee(), "a drag blocks the marquee");
+}

@@ -327,6 +327,14 @@ impl DynamicGnomon {
         self.drag.is_some()
     }
 
+    /// Whether the frame owns the pointer this frame, so the viewport must not start its marquee:
+    /// a handle is hovered, a drag is in progress, or a click mode waits for its pick.
+    pub fn blocks_viewport_marquee(&self) -> bool {
+        self.drag.is_some()
+            || self.hovered_handle != GnomonHandle::None
+            || matches!(self.state, GnomonActiveState::OriginSnap | GnomonActiveState::AxisOrbit(_) | GnomonActiveState::RelativeInput { .. })
+    }
+
     /// Put the origin at `p`. A point that is not a finite number is refused.
     pub fn set_origin(&mut self, p: Vec3) -> bool {
         if !finite(p) {
@@ -479,7 +487,8 @@ impl DynamicGnomon {
                     // A drag places the frame; a click asks for a mode or a value instead.
                     self.state = GnomonActiveState::Idle;
                 } else if let Some(mode) = click_mode(drag.handle, drag.press) {
-                    self.state = mode;
+                    // A second click on the handle that opened a snap mode drops it.
+                    self.state = toggled(self.state, mode);
                 }
                 self.drag = None;
             } else {
@@ -652,6 +661,16 @@ fn click_mode(handle: GnomonHandle, press: Pos2) -> Option<GnomonActiveState> {
     }
 }
 
+/// The state a click leaves: `opened`, or [`GnomonActiveState::Idle`] when the click landed on
+/// the handle that already opened that snap mode, so a snap mode toggles on and off.
+fn toggled(current: GnomonActiveState, opened: GnomonActiveState) -> GnomonActiveState {
+    match (current, opened) {
+        (GnomonActiveState::OriginSnap, GnomonActiveState::OriginSnap) => GnomonActiveState::Idle,
+        (GnomonActiveState::AxisOrbit(a), GnomonActiveState::AxisOrbit(b)) if a == b => GnomonActiveState::Idle,
+        _ => opened,
+    }
+}
+
 /// `v` turned by `angle` radians about the unit vector `direction` (Rodrigues).
 fn rotate_about(v: Vec3, direction: Vec3, angle: f64) -> Vec3 {
     let (sin, cos) = angle.sin_cos();
@@ -691,17 +710,18 @@ fn seg_dist(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     (a + ab * t).distance(p)
 }
 
-/// The handle nearest `p`, in the order a press takes them: the origin ball first, then a cone
-/// (which sits on the shaft's end, so it must be tested before the shaft), then the shaft, then
-/// a wheel.
+/// The handle nearest `p`, strictly separated so the parts of an arm never steal each other's
+/// clicks: a cone (the arrowhead at the arm's tip) first, then the origin ball, then the shaft
+/// (the line the cone sits on), then a wheel. The shaft's test stops short of the cone, so the
+/// two never overlap.
 fn hit(shapes: &Shapes, p: Pos2) -> GnomonHandle {
-    if shapes.origin.distance(p) <= ORIGIN_HIT {
-        return GnomonHandle::Origin;
-    }
     if let Some((axis, ..)) = shapes.arrows.iter().find(|(_, _, to)| to.distance(p) <= CONE_HIT) {
         return GnomonHandle::Cone(*axis);
     }
-    if let Some((axis, _, _)) = shapes.arrows.iter().find(|(_, from, to)| seg_dist(p, *from, *to) <= AXIS_HIT) {
+    if shapes.origin.distance(p) <= ORIGIN_HIT {
+        return GnomonHandle::Origin;
+    }
+    if let Some((axis, _, _)) = shapes.arrows.iter().find(|(_, from, to)| seg_dist(p, *from, shaft_end(*from, *to)) <= AXIS_HIT) {
         return GnomonHandle::Translate(*axis);
     }
     shapes
@@ -709,6 +729,14 @@ fn hit(shapes: &Shapes, p: Pos2) -> GnomonHandle {
         .iter()
         .find(|(_, points)| points.windows(2).any(|w| seg_dist(p, w[0], w[1]) <= RING_HIT))
         .map_or(GnomonHandle::None, |(axis, _)| GnomonHandle::Rotate(*axis))
+}
+
+/// Where the shaft's hit test ends: `to` backed off by the cone's radius, so a click on the
+/// arrowhead is never taken as the line beneath it.
+fn shaft_end(from: Pos2, to: Pos2) -> Pos2 {
+    let v = to - from;
+    let len = v.length();
+    if len <= CONE_HIT { to } else { to - v / len * CONE_HIT }
 }
 
 /// Draw one arm: its line and an arrowhead at `to`.
