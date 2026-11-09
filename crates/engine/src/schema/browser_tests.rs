@@ -236,6 +236,7 @@ fn the_visibility_reply_type_matches_the_design_s() {
         hidden_sketches: vec![4],
         shown_sketches: vec![5],
         hidden_joints: vec![6],
+        hidden_coordinate_systems: vec![9],
         origin_hidden: Some(true),
         hidden_profiles: vec![7],
         shown_dimensions: vec![8],

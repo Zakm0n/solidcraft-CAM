@@ -148,7 +148,7 @@ use serde_json::{Value, json};
 use solidcraft_engine::Sel;
 use solidcraft_engine::doc::{BrowserEntry, Document, FeatureKind};
 
-use crate::context_menu::{Item, Target};
+use crate::context_menu::{Item, Target, act, cmd};
 use crate::theme::Tokens;
 
 use crate::SolveApp;
@@ -1843,7 +1843,7 @@ fn component_rows_inner(
         doc_settings(app, ui, d);
         named_view_rows(app, ui, d, acts);
         origin_rows(app, ui, d, acts);
-        coordinate_system_folder_rows(app, ui, d);
+        coordinate_system_folder_rows(app, ui, d, acts);
         canvas_rows(app, ui, d, acts);
         point_clouds::rows(app, ui, d, acts);
         analysis_rows(app, ui, d, acts);
@@ -2219,27 +2219,127 @@ fn origin_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize, acts: &mut A
             pick_from_browser(app, x);
         }
     }
-    // The machining origins, next to the planes a setup is placed on.
-    coordinate_system_rows(app, ui, depth + 1);
+    // The machining origins are in their own Coordinate Systems folder, not here (#Z-CAM).
 }
 
 /// The CAM coordinate systems a machining operation works from: the machining origin and the
-/// machine's own axes. They are listed under the Origin's planes, next to the planes they sit
-/// on, and in their own folder ([`coordinate_system_folder_rows`]).
-fn coordinate_system_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize) {
-    let names: Vec<String> = app.session.doc.coordinate_systems.iter().map(|c| c.name.clone()).collect();
-    for (i, name) in names.iter().enumerate() {
-        let _ = draw_row(
+/// machine's own axes, in the browser's own Coordinate Systems folder.
+fn coordinate_system_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize, acts: &mut Actions) {
+    let systems: Vec<(u64, String)> = app.session.doc.coordinate_systems.iter().map(|c| (c.id, c.name.clone())).collect();
+    for (id, name) in systems {
+        let visible = !app.session.visibility.hidden_coordinate_systems.contains(&id);
+        let r = draw_row(
             ui,
-            ui.scope_id().with(("coordinate_system", i)),
-            &Row { depth, icon: "origin", label: name, name: true, ..Default::default() },
+            ui.scope_id().with(("coordinate_system", id)),
+            &Row { depth, eye: Some(visible), icon: "origin", label: &name, name: true, dim: !visible, ..Default::default() },
         );
+        if r.eye {
+            // Through the command, so an eye click is one undo step here too.
+            let _ = app.run("browser.visibility", json!({ "items": [id], "visible": !visible }));
+        }
+        if let Some(p) = r.secondary {
+            acts.menu = Some((p, Target::CoordinateSystem { id }));
+        }
+        // A double-click renames the row, as it does a body's; F2 does the same from its menu.
+        if r.double && !r.eye {
+            let at = r.rect.map(|x| x.left_bottom()).unwrap_or_default();
+            crate::context_menu::start_rename(app, crate::context_menu::RenameWhat::CoordinateSystem(id), at);
+        }
     }
+}
+
+/// A coordinate system's browser menu: edit its frame and name, delete it, rename it, show or
+/// hide its triad, sketch on it, or save a named view that looks along its Z.
+pub fn coordinate_system_items(app: &SolveApp, id: u64) -> Vec<Item> {
+    let Some(cs) = app.session.doc.coordinate_systems.iter().find(|c| c.id == id) else { return Vec::new() };
+    let visible = !app.session.visibility.hidden_coordinate_systems.contains(&id);
+    let point = |v: [f64; 3]| json!([v[0], v[1], v[2]]);
+    let items = vec![
+        // A sketch on the frame's own XY plane, through the frame's origin and directions.
+        cmd(app, "sketch.create", "Create Sketch").with(json!({
+            "plane": { "origin": point(cs.origin), "x_dir": point(cs.x_axis), "y_dir": point(cs.y_axis) },
+        })),
+        Item::sep(),
+        act("ui.editCoordinateSystem", "Edit Feature", "edit").with(json!({ "coordinate_system": id })),
+        Item::sep(),
+        // A setup works from it, so the engine refuses to delete it and the row says why.
+        cmd(app, "cam.coordinate_system.delete", "Delete").with(json!({ "coordinate_system": id })).off_because(
+            (!setup_free(app, id)).then(|| "A machining setup works from this coordinate system".to_string()),
+        ),
+        act("ui.rename", "Rename", "rename").key("F2").with(json!({ "coordinate_system": id })),
+        Item::sep(),
+        act("ui.coordinateSystemVisibility", "Show/Hide", "eye").key("V").with(json!({ "coordinate_system": id, "show": !visible })),
+        Item::sep(),
+        act("ui.coordinateSystemView", "Convert to Named View", "perspective").with(json!({ "coordinate_system": id })),
+    ];
+    items
+}
+
+/// Whether no machining setup works from this coordinate system: only then may it be deleted, as
+/// the engine's `cam.coordinate_system.delete` refuses otherwise.
+fn setup_free(app: &SolveApp, id: u64) -> bool {
+    !app.session.doc.cam.setups.iter().any(|setup| setup.coordinate_system == id)
+}
+
+/// Open the coordinate system dialog on an existing coordinate system: its name, origin and
+/// frame are filled in, and OK runs `cam.coordinate_system.edit` instead of creating one.
+pub fn edit_coordinate_system(app: &mut SolveApp, id: u64) {
+    let Some(mut d) = crate::dialogs::Dialog::for_command(app, "cam.coordinate_system.create") else { return };
+    let crate::dialogs::Kind::Cam(crate::dialogs_coupling::cam::Zcam::CoordinateSystem(f)) = &mut d.kind else { return };
+    if !f.edit_existing(&app.session.doc, id) {
+        return;
+    }
+    app.dialog = Some(d);
+}
+
+/// Make a coordinate system from a construction plane: its origin and its own X and Y become the
+/// frame's, with Z the plane's normal, and Origin Snap is on so the first pick moves the frame
+/// onto a point.
+pub fn coordinate_system_from_plane(app: &mut SolveApp, feature: u64) {
+    let Some((_, name, plane)) = solidcraft_engine::view::construction_planes(&app.session).into_iter().find(|(id, _, _)| *id == feature) else {
+        return;
+    };
+    let Some(mut d) = crate::dialogs::Dialog::for_command(app, "cam.coordinate_system.create") else { return };
+    let crate::dialogs::Kind::Cam(crate::dialogs_coupling::cam::Zcam::CoordinateSystem(f)) = &mut d.kind else { return };
+    f.from_plane(&app.session.doc, plane, name);
+    app.dialog = Some(d);
+}
+
+/// Save the current camera as a named view that looks along the coordinate system's Z, with its
+/// X across the screen: the view a part is machined from.
+pub fn coordinate_system_named_view(app: &mut SolveApp, id: u64) {
+    let Some(cs) = app.session.doc.coordinate_systems.iter().find(|c| c.id == id) else { return };
+    let camera = camera_along(&app.cam, cs);
+    let name = cs.name.clone();
+    if app.run("view.save", json!({ "view": name, "camera": camera })).is_ok() {
+        app.tree.collapsed.remove("namedviews");
+        app.tree.expanded.insert("namedviews".into());
+    }
+}
+
+/// A camera looking along the coordinate system's own −Z at its origin, with its +X across the
+/// screen and the view's present distance kept. It is the view a part is machined from.
+fn camera_along(cam: &solidcraft_engine::render::Camera, cs: &solidcraft_engine::doc::cam::CoordinateSystem) -> serde_json::Value {
+    let z = solidcore_record::Vec3::new(cs.z_axis[0], cs.z_axis[1], cs.z_axis[2]);
+    let x = solidcore_record::Vec3::new(cs.x_axis[0], cs.x_axis[1], cs.x_axis[2]);
+    let origin = solidcore_record::Vec3::new(cs.origin[0], cs.origin[1], cs.origin[2]);
+    // `Camera::back` from yaw and pitch: back = (−sin y · cos p, −cos y · cos p, sin p).
+    let unit = z.normalized().unwrap_or(solidcore_record::Vec3::Z);
+    let pitch = unit.z.clamp(-1.0, 1.0).asin();
+    let yaw = (-unit.x).atan2(-unit.y);
+    let mut camera = solidcraft_engine::render::Camera { target: origin, yaw, pitch, roll: 0.0, distance: cam.distance, fov: cam.fov, up: cam.up };
+    // Roll the view so the frame's +X runs across the screen, as the machine's X does.
+    let (right, up, _) = camera.basis();
+    let along = x - unit * x.dot(unit);
+    if along.normalized().is_some() {
+        camera.roll = along.dot(up).atan2(along.dot(right));
+    }
+    serde_json::to_value(camera).unwrap_or(serde_json::Value::Null)
 }
 
 /// The design's Coordinate Systems folder: the same CAM coordinate systems, in the browser's
 /// top level so a setup finds them without unfolding the Origin (#Z-CAM).
-fn coordinate_system_folder_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize) {
+fn coordinate_system_folder_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize, acts: &mut Actions) {
     let key = "coordinate_systems";
     let open = is_open(app, key, true);
     let r = draw_row(
@@ -2253,7 +2353,7 @@ fn coordinate_system_folder_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: u
     if !open {
         return;
     }
-    coordinate_system_rows(app, ui, depth + 1);
+    coordinate_system_rows(app, ui, depth + 1, acts);
 }
 
 /// The standard views listed under Named Views: (label, view).

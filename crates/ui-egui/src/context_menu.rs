@@ -84,6 +84,10 @@ pub enum Target {
     CamToolpath {
         id: u64,
     },
+    /// A CAM coordinate system, in the browser's Coordinate Systems folder.
+    CoordinateSystem {
+        id: u64,
+    },
     /// A command (toolbar button, panel drop-down row, S box row).
     ToolbarCommand {
         id: String,
@@ -303,6 +307,8 @@ pub enum RenameWhat {
     Canvas(u64),
     View(String),
     Joint(u64),
+    /// A CAM coordinate system, by id (`cam.coordinate_system.edit`).
+    CoordinateSystem(u64),
 }
 
 #[derive(Clone, Debug)]
@@ -437,6 +443,7 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
         Target::Section => crate::browser::section_items(app),
         Target::Joint { id } => joint_items(app, *id),
         Target::CamToolpath { id } => crate::cam_browser::toolpath_items(app, *id),
+        Target::CoordinateSystem { id } => crate::browser::coordinate_system_items(app, *id),
         Target::ToolbarCommand { id } => crate::toolbar_custom::command_items(app, id),
         Target::Toolbar => crate::toolbar_custom::toolbar_items(app),
         Target::HistoryControls => crate::timeline::transport_items(app),
@@ -917,6 +924,8 @@ fn plane_items(app: &SolveApp, id: u64) -> Vec<Item> {
     let mut items = Vec::new();
     if matches!(f.kind, solidcraft_engine::doc::FeatureKind::ConstructionPlane { .. }) {
         items.push(cmd(app, "sketch.create", "Create Sketch").with(json!({ "plane": f.name })));
+        // The plane's own frame, seeded into a coordinate system whose Origin Snap is on.
+        items.push(act("ui.coordinateSystemFromPlane", "Convert to Coordinate System", "origin").with(json!({ "feature": id })));
         items.push(Item::sep());
     }
     items.push(act("ui.editFeature", "Edit Feature", crate::timeline::icon_of(&f.kind)).with(json!({ "feature": id })));
@@ -1638,6 +1647,8 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
                 RenameWhat::View(v.to_string())
             } else if let Some(j) = id_of(&p, "joint") {
                 RenameWhat::Joint(j)
+            } else if let Some(c) = id_of(&p, "coordinate_system") {
+                RenameWhat::CoordinateSystem(c)
             } else {
                 return;
             };
@@ -1896,6 +1907,28 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
             if let Some(f) = id_of(&p, "feature") {
                 app.edit_feature(f);
             }
+        }
+        // A coordinate system's own actions: its browser row's menu, and the plane that becomes
+        // one.
+        "ui.editCoordinateSystem" => {
+            if let Some(id) = id_of(&p, "coordinate_system") {
+                crate::browser::edit_coordinate_system(app, id);
+            }
+        }
+        "ui.coordinateSystemFromPlane" => {
+            if let Some(feature) = id_of(&p, "feature") {
+                crate::browser::coordinate_system_from_plane(app, feature);
+            }
+        }
+        "ui.coordinateSystemView" => {
+            if let Some(id) = id_of(&p, "coordinate_system") {
+                crate::browser::coordinate_system_named_view(app, id);
+            }
+        }
+        "ui.coordinateSystemVisibility" => {
+            let Some(id) = id_of(&p, "coordinate_system") else { return };
+            let visible = p.get("show").and_then(Value::as_bool).unwrap_or(true);
+            let _ = app.run("browser.visibility", json!({ "items": [id], "visible": visible }));
         }
         "ui.appearance" => {
             if item.params.is_some() {
@@ -2162,6 +2195,7 @@ pub fn start_rename(app: &mut SolveApp, what: RenameWhat, at: Pos2) {
         RenameWhat::Canvas(c) => doc.canvases.iter().find(|x| x.id == *c).map(|x| x.name.clone()).unwrap_or_default(),
         RenameWhat::View(v) => v.clone(),
         RenameWhat::Joint(j) => doc.assembly.joints.iter().find(|x| x.id == *j).map(|x| x.name.clone()).unwrap_or_default(),
+        RenameWhat::CoordinateSystem(c) => doc.coordinate_systems.iter().find(|x| x.id == *c).map(|x| x.name.clone()).unwrap_or_default(),
     };
     app.menu.rename = Some(Rename { what, text, at, focused: false, inline: false });
 }
@@ -2186,6 +2220,7 @@ pub(crate) fn commit_rename(app: &mut SolveApp, r: &Rename) -> Result<(), String
         RenameWhat::Canvas(c) => app.run("canvas.edit", json!({ "canvas": c, "name": name })).map(|_| ()),
         RenameWhat::View(v) => app.run("view.rename", json!({ "view": v, "name": name })).map(|_| ()),
         RenameWhat::Joint(j) => app.run("joint.edit", json!({ "joint": j, "name": name })).map(|_| ()),
+        RenameWhat::CoordinateSystem(c) => app.run("cam.coordinate_system.edit", json!({ "coordinate_system": c, "name": name })).map(|_| ()),
     };
     // The command's own status line explains a refusal; the caller decides whether to keep the
     // editor open on it.
@@ -2355,6 +2390,7 @@ pub fn check_target(app: &SolveApp, target: &Target) -> Result<(), String> {
         }
         Target::Joint { id } => doc.assembly.joints.iter().any(|j| j.id == *id),
         Target::CamToolpath { id } => doc.cam.toolpaths.iter().any(|p| p.id == *id),
+        Target::CoordinateSystem { id } => doc.coordinate_systems.iter().any(|c| c.id == *id),
         Target::ToolbarCommand { id } => solidcraft_engine::find_command(id).is_some(),
         Target::NamedView { name } => {
             doc.named_views.iter().any(|v| v.name == *name) || crate::browser::STANDARD_VIEWS.iter().any(|(label, _)| label == name)

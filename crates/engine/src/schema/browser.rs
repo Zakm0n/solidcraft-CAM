@@ -967,6 +967,9 @@ pub struct VisibilityState {
     /// Joints whose glyphs are hidden, by id. Present when there are any.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_joints: Vec<u64>,
+    /// CAM coordinate systems whose triads are hidden, by id. Present when there are any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_coordinate_systems: Vec<u64>,
     /// Whether the Origin folder is hidden. Present when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_hidden: Option<bool>,
@@ -993,6 +996,7 @@ impl From<&solidcraft_doc::Visibility> for VisibilityState {
             hidden_sketches: v.hidden_sketches.clone(),
             shown_sketches: v.shown_sketches.clone(),
             hidden_joints: v.hidden_joints.clone(),
+            hidden_coordinate_systems: v.hidden_coordinate_systems.clone(),
             origin_hidden: v.origin_hidden,
             hidden_profiles: v.hidden_profiles.clone(),
             shown_dimensions: v.shown_dimensions.clone(),

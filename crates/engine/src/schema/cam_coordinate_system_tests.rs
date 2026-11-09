@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use super::{CoordinateSystemCreated, CreateCoordinateSystemParams};
+use super::{CoordinateSystemCreated, CoordinateSystemDeleted, CoordinateSystemEdited, CreateCoordinateSystemParams, EditCoordinateSystemParams};
 use crate::Session;
 use crate::schema::tests::{assert_keys, assert_strict_keeps_todays_errors, conforms};
 use crate::schema::{ParamCheck, input_schema_for, output_schema_for};
@@ -8,6 +8,7 @@ use crate::schema::{ParamCheck, input_schema_for, output_schema_for};
 #[test]
 fn schemas_and_the_key_check_agree() {
     assert_keys(input_schema_for::<CreateCoordinateSystemParams>(), &["name", "origin", "x_axis", "y_axis", "z_axis"]);
+    assert_keys(input_schema_for::<EditCoordinateSystemParams>(), &["coordinate_system", "name", "origin", "x_axis", "y_axis", "z_axis"]);
 }
 
 #[test]
@@ -68,4 +69,78 @@ fn create_refuses_axes_that_are_not_square_and_repeated_names() {
     let repeated = s.execute("cam.coordinate_system.create", &json!({"name": "Top"})).unwrap_err().to_string();
     assert!(repeated.contains("already exists"), "{repeated}");
     assert_eq!(s.doc.coordinate_systems.len(), 1);
+}
+
+/// Editing a coordinate system changes only what the call names: a rename leaves the frame where
+/// it is, and a move leaves the name alone.
+#[test]
+fn edit_changes_the_keys_it_names_and_keeps_the_rest() {
+    let mut s = Session::default();
+    let created = s.execute("cam.coordinate_system.create", &json!({"origin": [1, 2, 3], "name": "Top"})).unwrap();
+    let id = created["coordinate_system"].as_u64().unwrap();
+    let renamed = s.execute("cam.coordinate_system.edit", &json!({"coordinate_system": id, "name": "Stock Top"})).unwrap();
+    assert_eq!(renamed["name"], "Stock Top");
+    assert_eq!(renamed["origin"], json!([1.0, 2.0, 3.0]), "a rename leaves the frame where it is");
+    assert_eq!(s.doc.coordinate_systems[0].name, "Stock Top");
+
+    let moved = s.execute("cam.coordinate_system.edit", &json!({"coordinate_system": id, "origin": [10, 0, 0], "x_axis": [0, 1, 0]})).unwrap();
+    assert_eq!(moved["name"], "Stock Top");
+    assert_eq!(s.doc.coordinate_systems[0].origin, [10.0, 0.0, 0.0]);
+    assert_eq!(s.doc.coordinate_systems[0].x_axis, [0.0, 1.0, 0.0], "a direction is stored as a unit vector");
+    assert_eq!(s.doc.coordinate_systems[0].y_axis, [-1.0, 0.0, 0.0], "Y follows the Z and X the call leaves");
+    let schema = output_schema_for::<CoordinateSystemEdited>();
+    let schema = schema.as_value();
+    assert!(conforms(schema, schema, &moved), "{moved} doesn't match {schema}");
+}
+
+#[test]
+fn edit_refuses_a_repeated_name_or_skewed_axes_and_changes_nothing() {
+    let mut s = Session::default();
+    let first = s.execute("cam.coordinate_system.create", &json!({"name": "Top"})).unwrap()["coordinate_system"].as_u64().unwrap();
+    let second = s.execute("cam.coordinate_system.create", &json!({"name": "Side"})).unwrap()["coordinate_system"].as_u64().unwrap();
+    let before = s.doc.coordinate_systems.clone();
+    let repeated = s.execute("cam.coordinate_system.edit", &json!({"coordinate_system": second, "name": "Top"})).unwrap_err().to_string();
+    assert!(repeated.contains("already exists"), "{repeated}");
+    let skewed = s
+        .execute("cam.coordinate_system.edit", &json!({"coordinate_system": first, "x_axis": [1, 0, 0], "y_axis": [1, 0, 0]}))
+        .unwrap_err()
+        .to_string();
+    assert!(skewed.contains("square"), "{skewed}");
+    assert_eq!(s.doc.coordinate_systems, before, "a refused call changes nothing");
+    // Its own name is not another's: renaming to the same name is fine.
+    s.execute("cam.coordinate_system.edit", &json!({"coordinate_system": first, "name": "Top"})).unwrap();
+}
+
+/// A coordinate system a setup works from is not deleted: the setup would be left without a
+/// machining origin. Deleting any other takes it out of the design, and out of the hidden list.
+#[test]
+fn delete_refuses_one_a_setup_holds_and_removes_the_rest() {
+    let mut s = Session::default();
+    let held = s.execute("cam.coordinate_system.create", &json!({"name": "Held"})).unwrap()["coordinate_system"].as_u64().unwrap();
+    let spare = s.execute("cam.coordinate_system.create", &json!({"name": "Spare"})).unwrap()["coordinate_system"].as_u64().unwrap();
+    s.execute("cam.setup.create", &json!({"coordinate_system": held})).unwrap();
+    let refused = s.execute("cam.coordinate_system.delete", &json!({"coordinate_system": held})).unwrap_err().to_string();
+    assert!(refused.contains("Setup 1") || refused.contains("works from"), "{refused}");
+    assert_eq!(s.doc.coordinate_systems.len(), 2);
+
+    s.execute("browser.visibility", &json!({"items": [spare], "visible": false})).unwrap();
+    let reply = s.execute("cam.coordinate_system.delete", &json!({"coordinate_system": spare})).unwrap();
+    assert_eq!(reply["name"], "Spare");
+    assert_eq!(reply["count"], 1);
+    assert_eq!(s.doc.coordinate_systems.len(), 1);
+    assert!(s.visibility.hidden_coordinate_systems.is_empty(), "the deleted coordinate system is no longer hidden");
+    let schema = output_schema_for::<CoordinateSystemDeleted>();
+    let schema = schema.as_value();
+    assert!(conforms(schema, schema, &reply), "{reply} doesn't match {schema}");
+}
+
+/// The browser hides and shows a coordinate system's triad by id, as it does a joint's glyph.
+#[test]
+fn visibility_hides_and_shows_a_coordinate_system() {
+    let mut s = Session::default();
+    let id = s.execute("cam.coordinate_system.create", &json!({"name": "Top"})).unwrap()["coordinate_system"].as_u64().unwrap();
+    s.execute("browser.visibility", &json!({"items": [id], "visible": false})).unwrap();
+    assert_eq!(s.visibility.hidden_coordinate_systems, vec![id]);
+    s.execute("browser.visibility", &json!({"items": ["Top"], "visible": true})).unwrap();
+    assert!(s.visibility.hidden_coordinate_systems.is_empty(), "a name finds the coordinate system too");
 }

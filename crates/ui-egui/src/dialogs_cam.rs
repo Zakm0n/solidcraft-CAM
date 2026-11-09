@@ -227,7 +227,13 @@ impl Zcam {
     pub fn command(&self) -> &'static str {
         match self {
             Zcam::Setup(_) => "cam.setup.create",
-            Zcam::CoordinateSystem(_) => "cam.coordinate_system.create",
+            Zcam::CoordinateSystem(f) => {
+                if f.editing.is_some() {
+                    "cam.coordinate_system.edit"
+                } else {
+                    "cam.coordinate_system.create"
+                }
+            }
             Zcam::ToolLibrary(_) => "cam.tool.list",
             Zcam::Contour(_) => "cam.toolpath.contour",
             Zcam::Pocket(_) => "cam.toolpath.pocket",
@@ -303,6 +309,9 @@ pub struct DialogCamCoordinateSystem {
     pub origin_z: String,
     /// The frame moved in the view (a drag or an alignment): the fields show it again.
     refresh: bool,
+    /// The coordinate system this dialog changes (`cam.coordinate_system.edit`); `None` creates
+    /// a new one.
+    editing: Option<u64>,
 }
 
 impl DialogCamCoordinateSystem {
@@ -316,6 +325,7 @@ impl DialogCamCoordinateSystem {
             origin_y: zero(),
             origin_z: zero(),
             refresh: false,
+            editing: None,
         }
     }
 
@@ -326,6 +336,43 @@ impl DialogCamCoordinateSystem {
         self.origin_y = crate::length_input::shown(doc, o.y);
         self.origin_z = crate::length_input::shown(doc, o.z);
     }
+
+    /// The coordinate system this form changes, when it edits one rather than creating one.
+    pub fn editing(&self) -> Option<u64> {
+        self.editing
+    }
+
+    /// Fill the form with an existing coordinate system: its name, origin and frame, and the
+    /// command OK runs becomes `cam.coordinate_system.edit`. False when the design has no such
+    /// coordinate system, or its frame holds a direction the view cannot use.
+    pub fn edit_existing(&mut self, doc: &solidcraft_engine::doc::Document, id: u64) -> bool {
+        let Some(cs) = doc.coordinate_systems.iter().find(|c| c.id == id) else { return false };
+        let (Some(origin), Some(x), Some(z)) = (finite_point(cs.origin), finite_point(cs.x_axis), finite_point(cs.z_axis)) else {
+            return false;
+        };
+        let Some(gnomon) = DynamicGnomon::new(origin, x, z) else { return false };
+        self.gnomon = gnomon;
+        self.name = cs.name.clone();
+        self.editing = Some(id);
+        self.sync_fields(doc);
+        true
+    }
+
+    /// Start from a construction plane: its origin, its own X and Y (so Z is the plane's
+    /// normal), its name, and Origin Snap on so the first pick moves the frame onto a point.
+    pub fn from_plane(&mut self, doc: &solidcraft_engine::doc::Document, plane: solidcore_record::Plane, name: String) {
+        if let Some(gnomon) = DynamicGnomon::new(plane.origin, plane.x, plane.x.cross(plane.y)) {
+            self.gnomon = gnomon;
+        }
+        self.name = name;
+        self.gnomon.set_align_mode(GnomonAlignMode::SnapOrigin);
+        self.sync_fields(doc);
+    }
+}
+
+/// A stored point as a frame can use it: `None` when a part is not a finite number.
+fn finite_point(p: [f64; 3]) -> Option<Vec3> {
+    p.iter().all(|v| v.is_finite()).then(|| Vec3::new(p[0], p[1], p[2]))
 }
 
 /// The dialog's rows: its name, the alignment mode, and the origin's three values.
@@ -398,7 +445,13 @@ fn coordinate_system_commands(f: &DialogCamCoordinateSystem) -> Result<Vec<(Stri
     if !name.is_empty() {
         p["name"] = json!(name);
     }
-    Ok(vec![("cam.coordinate_system.create".to_string(), p)])
+    match f.editing {
+        Some(id) => {
+            p["coordinate_system"] = json!(id);
+            Ok(vec![("cam.coordinate_system.edit".to_string(), p)])
+        }
+        None => Ok(vec![("cam.coordinate_system.create".to_string(), p)]),
+    }
 }
 
 /// Draw the gnomon over the view and take this frame's drag; a pick in the view aligns the frame

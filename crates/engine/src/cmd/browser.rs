@@ -415,6 +415,8 @@ enum Shown {
     Origin(String),
     /// An assembly joint's glyph, by joint id.
     Joint(u64),
+    /// A CAM coordinate system's triad, by coordinate system id.
+    CoordinateSystem(u64),
 }
 
 fn is_construction(k: &FeatureKind) -> bool {
@@ -447,7 +449,14 @@ fn shown_item_exact(s: &Session, world: &solidcraft_doc::ModelState, key: &str) 
     if world.bodies.iter().any(|b| b.name == key) {
         return Some(Shown::Body(key.to_string()));
     }
-    s.doc.assembly.joints.iter().find(|j| j.name == key).map(|j| Shown::Joint(j.id))
+    if let Some(joint) = s.doc.assembly.joints.iter().find(|j| j.name == key) {
+        return Some(Shown::Joint(joint.id));
+    }
+    let coordinate_system = match key.parse::<u64>() {
+        Ok(id) => s.doc.coordinate_systems.iter().find(|c| c.id == id),
+        Err(_) => s.doc.coordinate_systems.iter().find(|c| c.name == key),
+    };
+    coordinate_system.map(|c| Shown::CoordinateSystem(c.id))
 }
 
 /// The item a key names when nothing matches it exactly: the name is compared without regard to
@@ -713,6 +722,7 @@ fn visibility(s: &mut Session, p: &Value) -> Result<Value> {
             all.extend(s.doc.features.iter().filter(|f| is_construction(&f.kind)).map(|f| Shown::Origin(f.name.clone())));
             all.extend(ORIGIN.iter().map(|o| Shown::Origin(o.to_string())));
             all.extend(s.doc.assembly.joints.iter().map(|j| Shown::Joint(j.id)));
+            all.extend(s.doc.coordinate_systems.iter().map(|c| Shown::CoordinateSystem(c.id)));
             all
         }
         (Some(f), None) => return Err(bad(cmd, format!("unknown folder `{f}` (bodies, sketches, construction, origin, joints, all)"))),
@@ -791,6 +801,13 @@ fn visibility(s: &mut Session, p: &Value) -> Result<Value> {
                     v.hidden_joints.retain(|x| x != id);
                 } else if !v.hidden_joints.contains(id) {
                     v.hidden_joints.push(*id);
+                }
+            }
+            Shown::CoordinateSystem(id) => {
+                if visible {
+                    v.hidden_coordinate_systems.retain(|x| x != id);
+                } else if !v.hidden_coordinate_systems.contains(id) {
+                    v.hidden_coordinate_systems.push(*id);
                 }
             }
         }

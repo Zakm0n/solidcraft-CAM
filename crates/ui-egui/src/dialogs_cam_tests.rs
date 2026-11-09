@@ -355,3 +355,24 @@ fn a_picked_face_or_edge_aligns_the_frame() {
     assert!(super::align_to(&app, f, &Sel::Vertex { body, point: at }));
     assert_eq!(f.gnomon.origin(), at);
 }
+
+/// #Z-CAM: a construction plane converts to a coordinate system: its origin, its own X and Y (so
+/// Z is the plane's normal) and its name go into the frame, with Origin Snap on.
+#[test]
+fn a_construction_plane_seeds_a_coordinate_system() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    app.run("construct.plane.offset", json!({"base": "XY", "offset": 20, "name": "Shelf"})).unwrap();
+    let feature = app.session.doc.features.iter().find(|f| f.name == "Shelf").map(|f| f.id).expect("the plane");
+    crate::browser::coordinate_system_from_plane(&mut app, feature);
+    let d = app.dialog.as_ref().expect("the coordinate system dialog opens");
+    let Kind::Cam(Zcam::CoordinateSystem(f)) = &d.kind else { panic!("the coordinate system dialog") };
+    assert_eq!(f.name, "Shelf");
+    assert_eq!(f.gnomon.align_mode(), GnomonAlignMode::SnapOrigin, "Origin Snap is on");
+    assert!((f.gnomon.origin().z - 20.0).abs() < 1e-9, "{:?}", f.gnomon.origin());
+    assert!(f.gnomon.z_axis().vec().dist(Vec3::Z) < 1e-9, "{:?}", f.gnomon.z_axis().vec());
+    assert!(f.gnomon.x_axis().vec().dist(Vec3::X) < 1e-9, "{:?}", f.gnomon.x_axis().vec());
+    let cmds = apply_commands(&app, d).unwrap();
+    assert_eq!(cmds[0].0, "cam.coordinate_system.create");
+    assert_eq!(cmds[0].1["origin"], json!([0.0, 0.0, 20.0]));
+    assert_eq!(cmds[0].1["name"], "Shelf");
+}

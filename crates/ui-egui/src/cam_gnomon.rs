@@ -41,6 +41,7 @@ pub fn gnomons(app: &SolveApp) -> Vec<Gnomon> {
         .doc
         .coordinate_systems
         .iter()
+        .filter(|c| !app.session.visibility.hidden_coordinate_systems.contains(&c.id))
         .filter_map(|c| {
             let origin = point(c.origin)?;
             let axes = [point(c.x_axis)?, point(c.y_axis)?, point(c.z_axis)?];

@@ -3291,6 +3291,10 @@ pub struct Visibility {
     /// Assembly joints by id: their glyphs are not drawn (they still constrain and move).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hidden_joints: Vec<u64>,
+    /// CAM coordinate systems by id whose triads are not drawn in the view
+    /// (`cam.coordinate_system.create`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hidden_coordinate_systems: Vec<u64>,
     /// The browser's Origin folder is hidden (`None`: the app's preference decides).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin_hidden: Option<bool>,
@@ -3320,6 +3324,7 @@ impl Visibility {
             && self.hidden_sketches.is_empty()
             && self.shown_sketches.is_empty()
             && self.hidden_joints.is_empty()
+            && self.hidden_coordinate_systems.is_empty()
             && self.origin_hidden.is_none()
             && self.hidden_profiles.is_empty()
             && self.shown_dimensions.is_empty()

@@ -2200,3 +2200,27 @@ fn parked_reveals_are_pruned_against_their_own_document_when_the_target_is_remov
     semantic_frame(&mut h, &[], Vec::new(), egui::Modifiers::NONE);
     assert_no_pending_reveals(&h);
 }
+
+/// #Z-CAM: a CAM coordinate system is listed in its own Coordinate Systems folder and never
+/// under Origin, and its row's eye hides its triad through the command.
+#[test]
+fn a_coordinate_system_is_listed_in_its_own_folder_and_not_under_origin() {
+    let mut h = Harness::new();
+    h.app.home.open = false;
+    h.app.run("cam.coordinate_system.create", json!({"name": "Top"})).unwrap();
+    h.settle();
+    let rows = || drawn_rows().into_iter().map(|(label, ..)| label).collect::<Vec<_>>();
+    assert_eq!(rows().iter().filter(|label| *label == "Top").count(), 1, "listed once: {:?}", rows());
+    assert!(rows().iter().any(|label| label == "Coordinate Systems"), "{:?}", rows());
+    // Opening Origin lists no coordinate system under it.
+    if handle_at("row:Origin").is_some() {
+        h.step(&json!({"click":{"handle":"row:Origin"}})).unwrap();
+        h.settle();
+    }
+    assert_eq!(rows().iter().filter(|label| *label == "Top").count(), 1, "Origin holds no coordinate system: {:?}", rows());
+    // The row's eye hides the triad through browser.visibility.
+    h.step(&json!({"click":{"handle":"eye:Top"}})).unwrap();
+    h.settle();
+    let id = h.app.session.doc.coordinate_systems[0].id;
+    assert_eq!(h.app.session.visibility.hidden_coordinate_systems, vec![id]);
+}

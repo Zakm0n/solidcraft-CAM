@@ -2311,3 +2311,53 @@ fn the_history_bar_feature_menu_is_reported_and_picked() {
     h.frames(2);
     assert!(h.app.session.doc.feature(id).is_none(), "the features after the marker are deleted");
 }
+
+/// #Z-CAM: a coordinate system's browser menu offers its own actions; Rename renames it through
+/// `cam.coordinate_system.edit`, Show/Hide hides its triad through `browser.visibility`, and Edit
+/// Feature opens the dialog on the existing frame.
+#[test]
+fn a_coordinate_system_menu_edits_renames_and_hides_it() {
+    let mut s = Session::default();
+    let id = s.execute("cam.coordinate_system.create", &json!({"name": "Top"})).unwrap()["coordinate_system"].as_u64().unwrap();
+    let mut app = SolveApp::new(s, Services::default());
+    let target = Target::CoordinateSystem { id };
+    let items = context_menu::items(&app, &target);
+    for label in ["Create Sketch", "Edit Feature", "Delete", "Rename", "Show/Hide", "Convert to Named View"] {
+        assert!(items.iter().any(|item| item.label == label), "no `{label}`: {:?}", items.iter().map(|item| &item.label).collect::<Vec<_>>());
+    }
+    // Rename opens the browser's rename box, and the typed name goes through the edit command.
+    let rename = find(&items, "Rename");
+    context_menu::run_item(&mut app, &rename, pos2(0.0, 0.0));
+    let mut box_ = app.menu.rename.take().expect("a rename box");
+    assert!(matches!(box_.what, crate::context_menu::RenameWhat::CoordinateSystem(x) if x == id));
+    box_.text = "Stock Top".into();
+    context_menu::commit_rename(&mut app, &box_).unwrap();
+    assert_eq!(app.session.doc.coordinate_systems[0].name, "Stock Top");
+
+    // Show/Hide hides the triad; the browser lists it faded, and the command is one undo step.
+    act(&mut app, &target, "Show/Hide");
+    assert_eq!(app.session.visibility.hidden_coordinate_systems, vec![id]);
+    act(&mut app, &target, "Show/Hide");
+    assert!(app.session.visibility.hidden_coordinate_systems.is_empty());
+
+    // Edit Feature opens the dialog on the system's own frame and name.
+    act(&mut app, &target, "Edit Feature");
+    let dialog = app.dialog.as_ref().expect("the edit dialog opens");
+    let crate::dialogs::Kind::Cam(crate::dialogs_coupling::cam::Zcam::CoordinateSystem(form)) = &dialog.kind else {
+        panic!("the coordinate system dialog");
+    };
+    assert_eq!(form.name, "Stock Top");
+    assert_eq!(form.editing(), Some(id), "OK runs cam.coordinate_system.edit on this system");
+}
+
+/// A coordinate system a setup works from cannot be deleted: its menu says why.
+#[test]
+fn a_coordinate_system_a_setup_works_from_cannot_be_deleted() {
+    let mut s = Session::default();
+    let id = s.execute("cam.coordinate_system.create", &json!({"name": "Top"})).unwrap()["coordinate_system"].as_u64().unwrap();
+    s.execute("cam.setup.create", &json!({"coordinate_system": id})).unwrap();
+    let app = SolveApp::new(s, Services::default());
+    let delete = find(&context_menu::items(&app, &Target::CoordinateSystem { id }), "Delete");
+    assert!(!delete.enabled, "a setup works from it");
+    assert!(delete.tip.as_ref().is_some_and(|tip| tip.contains("setup")), "{delete:?}");
+}
