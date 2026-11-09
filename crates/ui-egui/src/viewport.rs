@@ -5618,6 +5618,8 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             && rect.contains(a)
             && !crate::shell::covered(app, a)
             && !axes.contains(a)
+            // A drag that began on the gnomon's frame places the frame: it is no rubber band.
+            && !crate::dialogs_coupling::cam::gnomon_owns(app, &proj, a)
         {
             // The lasso (#4376) follows the pointer from the press; the rectangle spans it.
             match &mut app.viewport.boxsel {

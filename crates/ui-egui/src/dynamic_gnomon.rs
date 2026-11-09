@@ -1,14 +1,17 @@
 //! The dynamic gnomon: a local coordinate frame the user places in the 3D view, with an origin
-//! ball, one translation arrow per axis and one rotation ring per axis. The arms keep a constant
-//! size on screen, as the Move triad's do, so the frame stays usable at every zoom; the frame
-//! itself is kept square, so the three arms always name an orthogonal machining frame.
+//! ball, one translation arm per axis (a shaft and a cone at its tip) and one rotation wheel per
+//! axis. The arms keep a constant size on screen, as the Move triad's do, so the frame stays
+//! usable at every zoom; the frame itself is kept square, so the three arms always name an
+//! orthogonal machining frame, and the wheels lie in that frame's own planes.
 //!
 //! The widget owns only its own state: it draws over the viewport, hit-tests its handles against
-//! the projected geometry and reports a drag's [`Change`]. The caller decides what the change
-//! means (the CAM coordinate system dialog writes it into the frame's values), and picks B-rep
-//! geometry for an alignment mode outside this module.
+//! the projected geometry, reports a drag's [`Change`] and remembers which of its click modes a
+//! press opened ([`GnomonActiveState`]). The caller decides what the change means (the CAM
+//! coordinate system dialog writes it into the frame's values), resolves geometry for a snap (the
+//! B-rep's vertices, edge midpoints, circle centres and face centroids) and shows the floating
+//! value entry a click on a shaft or a wheel opens.
 
-use egui::{Color32, Painter, Pos2, Shape, Stroke};
+use egui::{Align2, Color32, FontId, Painter, Pos2, Shape, Stroke};
 use solidcore_record::Vec3;
 use solidcraft_engine::geom::UnitVec3;
 use solidcraft_engine::geom::prelude::*;
@@ -26,8 +29,14 @@ const ORIGIN_RADIUS: f32 = 6.0;
 const ORIGIN_HIT: f32 = 10.0;
 /// How near an arm a press still takes it, in points.
 const AXIS_HIT: f32 = 6.0;
+/// How near an arm's cone a press still takes the cone, in points.
+const CONE_HIT: f32 = 9.0;
 /// How near a rotation ring a press still takes it, in points.
 const RING_HIT: f32 = 5.0;
+/// How far the pointer may travel from a press and still count as a click, in points.
+const CLICK_SLOP: f32 = 3.0;
+/// The gap between a cone's tip and its axis letter, in points.
+const LABEL_GAP: f32 = 10.0;
 /// Points one rotation ring is drawn (and hit-tested) with.
 const RING_POINTS: usize = 64;
 /// Where an arm starts, as a share of its length, so it leaves the origin ball clear.
@@ -61,12 +70,33 @@ pub enum GnomonHandle {
     /// No handle.
     #[default]
     None,
-    /// The origin ball: a free drag in the view plane.
+    /// The origin ball: a free drag in the view plane, or a click for Origin Snap Mode.
     Origin,
-    /// An arm: a drag along that axis.
+    /// An arm's shaft: a drag along that axis, or a click for a relative distance.
     Translate(Axis),
-    /// A rotation ring: a drag turning the frame about that axis.
+    /// An arm's cone: a click for Axis Orbit Mode, which points the axis at what is picked.
+    Cone(Axis),
+    /// A rotation wheel: a drag turning the frame about that axis, or a click for a relative
+    /// angle.
     Rotate(Axis),
+}
+
+/// What a click on the gnomon opened, if anything: the mode its next geometry pick acts in, or
+/// the value entry a click on a shaft or a wheel asked for. A drag leaves it [`Idle`]
+/// ([`GnomonActiveState::Idle`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum GnomonActiveState {
+    /// No click mode: a pick aligns the frame as the alignment mode says.
+    #[default]
+    Idle,
+    /// The origin ball was clicked: the next pick puts the origin on the point it names
+    /// (a vertex, a midpoint, a circle centre or a face's centroid).
+    OriginSnap,
+    /// A cone was clicked: the next pick turns that axis to point at it.
+    AxisOrbit(Axis),
+    /// A shaft or a wheel was clicked: a floating value entry sits at `pos`, for a distance along
+    /// the shaft or an angle about the wheel.
+    RelativeInput { handle: GnomonHandle, pos: Pos2 },
 }
 
 /// What a geometry pick aligns the frame to.
@@ -110,6 +140,8 @@ pub struct InputState {
     pub primary_down: bool,
     /// The primary button came up this frame.
     pub primary_released: bool,
+    /// Escape was pressed with no field taking the keyboard: the click mode ends.
+    pub escape: bool,
 }
 
 impl InputState {
@@ -117,7 +149,10 @@ impl InputState {
     pub fn read(ui: &egui::Ui) -> InputState {
         let (pointer, primary_pressed, primary_down, primary_released) =
             ui.input(|i| (i.pointer.interact_pos(), i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.primary_released()));
-        InputState { pointer, primary_pressed, primary_down, primary_released }
+        // A value entry's field takes Escape for itself: the click mode stays until the field
+        // lets the key go.
+        let escape = ui.ctx().memory(|m| m.focused().is_none()) && ui.input(|i| i.key_pressed(egui::Key::Escape));
+        InputState { pointer, primary_pressed, primary_down, primary_released, escape }
     }
 }
 
@@ -128,7 +163,7 @@ enum Grab {
     Point(Vec3),
     /// The parameter along the arm under the press.
     Along(f64),
-    /// The angle on the rotation ring under the press.
+    /// The angle on the rotation wheel under the press.
     Angle(f64),
 }
 
@@ -141,6 +176,10 @@ struct DragState {
     x_axis: UnitVec3,
     z_axis: UnitVec3,
     grab: Grab,
+    /// Where the press was, so a press that never moved is a click.
+    press: Pos2,
+    /// Whether the pointer left the press by more than [`CLICK_SLOP`]: a click it is not.
+    moved: bool,
     /// The view direction through the origin when the drag began: the plane the origin ball is
     /// dragged on, so a perspective camera's per-pixel rays cannot make the ball drift.
     view: Vec3,
@@ -156,6 +195,11 @@ impl DragState {
         }
     }
 
+    /// The frame the drag started from: +X, +Y and +Z.
+    fn frame(&self) -> [Vec3; 3] {
+        [self.axis(Axis::X), self.axis(Axis::Y), self.axis(Axis::Z)]
+    }
+
     /// What the press took, in this frame.
     fn grab(&self, proj: &Proj, pos: Pos2) -> Option<Grab> {
         match self.handle {
@@ -164,11 +208,12 @@ impl DragState {
             GnomonHandle::Rotate(axis) => {
                 let direction = self.axis(axis);
                 let at = crate::gizmo::on_plane(proj, pos, self.origin, direction)?;
-                let (e1, e2) = ring_basis(axis);
+                let (e1, e2) = ring_basis(self.frame(), axis);
                 let dart = at - self.origin;
                 Some(Grab::Angle(dart.dot(e2).atan2(dart.dot(e1))))
             }
-            GnomonHandle::None => None,
+            // A cone is a click, not a drag.
+            GnomonHandle::Cone(_) | GnomonHandle::None => None,
         }
     }
 }
@@ -191,6 +236,7 @@ pub struct DynamicGnomon {
     hovered_handle: GnomonHandle,
     align_mode: GnomonAlignMode,
     drag: Option<DragState>,
+    state: GnomonActiveState,
 }
 
 impl Default for DynamicGnomon {
@@ -203,6 +249,7 @@ impl Default for DynamicGnomon {
             hovered_handle: GnomonHandle::None,
             align_mode: GnomonAlignMode::Free,
             drag: None,
+            state: GnomonActiveState::Idle,
         }
     }
 }
@@ -263,6 +310,18 @@ impl DynamicGnomon {
         self.hovered_handle
     }
 
+    /// What a click on the gnomon opened: the mode its next pick acts in, or the value entry it
+    /// asked for. [`GnomonActiveState::Idle`] after a drag.
+    pub fn active_state(&self) -> GnomonActiveState {
+        self.state
+    }
+
+    /// Set the click mode; the caller clears it to [`GnomonActiveState::Idle`] once its pick has
+    /// been taken, so each click mode acts once.
+    pub fn set_active_state(&mut self, state: GnomonActiveState) {
+        self.state = state;
+    }
+
     /// Whether a drag is in progress.
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
@@ -316,44 +375,115 @@ impl DynamicGnomon {
         self.set_frame(x, z)
     }
 
+    /// Turn the frame about the shortest arc so `axis` points at `target`. False for a target the
+    /// frame cannot use: a point that is not a number, or the frame's own origin.
+    pub fn aim_axis(&mut self, axis: Axis, target: Vec3) -> bool {
+        if !finite(target) {
+            return false;
+        }
+        let Some(direction) = (target - self.origin).normalized() else { return false };
+        let from = self.axes()[axis.index()];
+        if !finite(from) {
+            return false;
+        }
+        // The turn's axis and angle: the short way round, and a half turn about any direction
+        // square to `from` when the two point opposite ways.
+        let Some((turn, angle)) = from
+            .cross(direction)
+            .normalized()
+            .map(|t| (t, from.dot(direction).clamp(-1.0, 1.0).acos()))
+            .or_else(|| from.any_perp().normalized().map(|t| (t, std::f64::consts::PI)))
+        else {
+            return false;
+        };
+        if !turn.is_finite() || !angle.is_finite() {
+            return false;
+        }
+        self.set_frame(rotate_about(self.x_axis.vec(), turn, angle), rotate_about(self.z_axis.vec(), turn, angle))
+    }
+
     /// Whether `p` is over one of the handles, so a press there belongs to the gnomon rather
     /// than to the camera (the Move triad's [`crate::gizmo::contains_pointer`]).
     pub fn contains_pointer(&self, proj: &Proj, p: Pos2) -> bool {
         self.shapes(proj).is_some_and(|shapes| hit(&shapes, p) != GnomonHandle::None)
     }
 
+    /// The handle under `p`, as [`DynamicGnomon::interact`] would take a press there.
+    pub fn handle_at(&self, proj: &Proj, p: Pos2) -> GnomonHandle {
+        self.hit(proj, p)
+    }
+
     /// Draw the frame over the view. The hovered or dragged handle is drawn in the accent colour
-    /// and thicker, so it reads as the one a press would take.
+    /// and thicker, so it reads as the one a press would take; each arm's letter sits past its
+    /// cone, and the mode a click opened rings the handle it opened on.
     pub fn draw(&self, painter: &Painter, proj: &Proj, theme: &Tokens) {
         let Some(shapes) = self.shapes(proj) else { return };
         let colour = |handle: GnomonHandle, axis: Axis| {
             if self.lit(handle) { theme.accent } else { theme.axes()[axis.index()] }
         };
-        // Rings behind the arms, the origin ball in front of both: the part a press takes first
-        // is drawn last, as a press takes the ball before an arm and an arm before a ring.
+        // Wheels behind the arms, the origin ball in front of both: the part a press takes first
+        // is drawn last, as a press takes the ball before an arm and an arm before a wheel.
         for (axis, points) in &shapes.rings {
             let handle = GnomonHandle::Rotate(*axis);
             painter.add(Shape::line(points.clone(), Stroke::new(if self.lit(handle) { 3.0 } else { 1.4 }, colour(handle, *axis))));
         }
+        let font = FontId::proportional(theme.font_triad);
         for (axis, from, to) in &shapes.arrows {
             let handle = GnomonHandle::Translate(*axis);
-            arrow(painter, *from, *to, colour(handle, *axis), self.lit(handle));
+            let cone = GnomonHandle::Cone(*axis);
+            let lit = self.lit(handle) || self.lit(cone);
+            let c = if lit { theme.accent } else { theme.axes()[axis.index()] };
+            arrow(painter, *from, *to, c, lit);
+            // The axis's letter, past its cone: never on it, so a press still takes the cone.
+            let v = *to - *from;
+            let beyond = if v.length() > 1.0 { *to + v.normalized() * LABEL_GAP } else { *to };
+            painter.text(beyond, Align2::CENTER_CENTER, axis_name(*axis).to_uppercase(), font.clone(), c);
         }
         let origin_handle = GnomonHandle::Origin;
         let origin_colour = if self.lit(origin_handle) { theme.accent } else { theme.text };
         painter.circle(shapes.origin, ORIGIN_RADIUS, theme.panel, Stroke::new(1.5, origin_colour));
+        // The click mode's handle: Origin Snap rings the ball, Axis Orbit its cone.
+        match self.state {
+            GnomonActiveState::OriginSnap => {
+                painter.circle_stroke(shapes.origin, ORIGIN_HIT + 3.0, Stroke::new(2.0, theme.accent));
+            }
+            GnomonActiveState::AxisOrbit(axis) => {
+                if let Some((_, _, to)) = shapes.arrows.iter().find(|(a, _, _)| *a == axis) {
+                    painter.circle_stroke(*to, CONE_HIT, Stroke::new(2.0, theme.accent));
+                }
+            }
+            GnomonActiveState::Idle | GnomonActiveState::RelativeInput { .. } => {}
+        }
         publish_handles(&shapes);
     }
 
     /// Follow this frame's drag, or begin one when the press landed on a handle. Every frame a
     /// drag changes the frame, the change is applied here and returned for the caller's values.
+    /// A press that is released without moving is a click: it opens the handle's mode
+    /// ([`GnomonActiveState`]) rather than moving the frame.
     pub fn interact(&mut self, proj: &Proj, input: &InputState) -> Option<Change> {
-        if self.drag.is_some() {
-            let change = input.pointer.filter(|p| finite_screen(*p)).and_then(|p| self.apply(proj, p));
+        if input.escape {
+            self.state = GnomonActiveState::Idle;
+        }
+        if let Some(mut drag) = self.drag {
+            let change = input.pointer.filter(|p| finite_screen(*p)).and_then(|p| {
+                if p.distance(drag.press) > CLICK_SLOP {
+                    drag.moved = true;
+                }
+                self.apply(proj, p)
+            });
             if input.primary_released || !input.primary_down {
-                self.drag = None;
                 self.active_handle = GnomonHandle::None;
                 self.hovered_handle = GnomonHandle::None;
+                if drag.moved {
+                    // A drag places the frame; a click asks for a mode or a value instead.
+                    self.state = GnomonActiveState::Idle;
+                } else if let Some(mode) = click_mode(drag.handle, drag.press) {
+                    self.state = mode;
+                }
+                self.drag = None;
+            } else {
+                self.drag = Some(drag);
             }
             return change;
         }
@@ -365,6 +495,9 @@ impl DynamicGnomon {
             let handle = self.hit(proj, p);
             if handle != GnomonHandle::None {
                 self.begin(proj, p, handle);
+            } else {
+                // A press on the model is a pick: the click mode ends.
+                self.state = GnomonActiveState::Idle;
             }
         }
         None
@@ -384,9 +517,18 @@ impl DynamicGnomon {
             x_axis: self.x_axis,
             z_axis: self.z_axis,
             grab: Grab::Point(Vec3::ZERO),
+            press: pos,
+            moved: false,
             view: view_dir(proj, self.origin),
         };
-        let Some(grab) = started.grab(proj, pos) else { return };
+        // A cone takes no drag: its press is only ever a click, so it needs no grab.
+        let grab = match handle {
+            GnomonHandle::Cone(_) => Grab::Point(Vec3::ZERO),
+            _ => match started.grab(proj, pos) {
+                Some(grab) => grab,
+                None => return,
+            },
+        };
         self.active_handle = handle;
         self.drag = Some(DragState { grab, ..started });
     }
@@ -420,7 +562,7 @@ impl DynamicGnomon {
                 let Grab::Angle(angle0) = drag.grab else { return None };
                 let direction = drag.axis(axis);
                 let at = crate::gizmo::on_plane(proj, pos, drag.origin, direction)?;
-                let (e1, e2) = ring_basis(axis);
+                let (e1, e2) = ring_basis(drag.frame(), axis);
                 let dart = at - drag.origin;
                 let angle = wrap(dart.dot(e2).atan2(dart.dot(e1)) - angle0);
                 if !angle.is_finite() {
@@ -429,11 +571,12 @@ impl DynamicGnomon {
                 self.set_frame(rotate_about(drag.x_axis.vec(), direction, angle), rotate_about(drag.z_axis.vec(), direction, angle));
                 Some(Change::Rotate { axis, angle })
             }
-            GnomonHandle::None => None,
+            // A cone never starts a drag, so its press changes nothing.
+            GnomonHandle::Cone(_) | GnomonHandle::None => None,
         }
     }
 
-    /// The handle under `pos`, in the order a press takes them: origin ball, arm, ring.
+    /// The handle under `pos`, in the order a press takes them: origin ball, cone, shaft, wheel.
     fn hit(&self, proj: &Proj, pos: Pos2) -> GnomonHandle {
         self.shapes(proj).map_or(GnomonHandle::None, |shapes| hit(&shapes, pos))
     }
@@ -446,20 +589,18 @@ impl DynamicGnomon {
         if !len.is_finite() || len <= 0.0 {
             return None;
         }
+        let frame = self.axes();
         let mut arrows = Vec::with_capacity(3);
         let mut rings = Vec::with_capacity(3);
         for axis in Axis::ALL {
-            let direction = match axis {
-                Axis::X => self.x_axis.vec(),
-                Axis::Y => self.y_axis().vec(),
-                Axis::Z => self.z_axis.vec(),
-            };
+            let direction = frame[axis.index()];
             if let (Some(from), Some(to)) =
                 (proj.to_screen(self.origin + direction * (ARM_START * len)), proj.to_screen(self.origin + direction * len))
             {
                 arrows.push((axis, from, to));
             }
-            let (e1, e2) = ring_basis(axis);
+            // The wheel lies in the frame's own plane for `axis`, so it turns with the frame.
+            let (e1, e2) = ring_basis(frame, axis);
             let points: Vec<Pos2> = (0..=RING_POINTS)
                 .filter_map(|i| {
                     let angle = std::f64::consts::TAU * i as f64 / RING_POINTS as f64;
@@ -490,12 +631,24 @@ fn square_to(v: Vec3, z: UnitVec3) -> UnitVec3 {
     square.unit().or_else(|| z.any_perp().unit()).unwrap_or(UnitVec3::X)
 }
 
-/// The in-plane directions of the ring about `axis`, right-handed: `e1 × e2 = axis`.
-fn ring_basis(axis: Axis) -> (Vec3, Vec3) {
+/// The in-plane directions of the wheel about `axis`, in the frame's own axes `frame` (+X, +Y,
+/// +Z), right-handed: `e1 × e2 = axis`.
+fn ring_basis(frame: [Vec3; 3], axis: Axis) -> (Vec3, Vec3) {
     match axis {
-        Axis::X => (Vec3::Y, Vec3::Z),
-        Axis::Y => (Vec3::Z, Vec3::X),
-        Axis::Z => (Vec3::X, Vec3::Y),
+        Axis::X => (frame[1], frame[2]),
+        Axis::Y => (frame[2], frame[0]),
+        Axis::Z => (frame[0], frame[1]),
+    }
+}
+
+/// What a click on `handle` at `press` opens: the origin ball its Origin Snap Mode, a cone Axis
+/// Orbit, a shaft or a wheel its value entry.
+fn click_mode(handle: GnomonHandle, press: Pos2) -> Option<GnomonActiveState> {
+    match handle {
+        GnomonHandle::Origin => Some(GnomonActiveState::OriginSnap),
+        GnomonHandle::Cone(axis) => Some(GnomonActiveState::AxisOrbit(axis)),
+        GnomonHandle::Translate(_) | GnomonHandle::Rotate(_) => Some(GnomonActiveState::RelativeInput { handle, pos: press }),
+        GnomonHandle::None => None,
     }
 }
 
@@ -538,10 +691,15 @@ fn seg_dist(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     (a + ab * t).distance(p)
 }
 
-/// The handle nearest `p`, in the order a press takes them.
+/// The handle nearest `p`, in the order a press takes them: the origin ball first, then a cone
+/// (which sits on the shaft's end, so it must be tested before the shaft), then the shaft, then
+/// a wheel.
 fn hit(shapes: &Shapes, p: Pos2) -> GnomonHandle {
     if shapes.origin.distance(p) <= ORIGIN_HIT {
         return GnomonHandle::Origin;
+    }
+    if let Some((axis, ..)) = shapes.arrows.iter().find(|(_, _, to)| to.distance(p) <= CONE_HIT) {
+        return GnomonHandle::Cone(*axis);
     }
     if let Some((axis, _, _)) = shapes.arrows.iter().find(|(_, from, to)| seg_dist(p, *from, *to) <= AXIS_HIT) {
         return GnomonHandle::Translate(*axis);
@@ -572,6 +730,7 @@ fn publish_handles(shapes: &Shapes) {
     crate::scenario::publish_handle("dynamic_gnomon:origin", shapes.origin);
     for (axis, _, to) in &shapes.arrows {
         crate::scenario::publish_handle(&format!("dynamic_gnomon:{}", axis_name(*axis)), *to);
+        crate::scenario::publish_handle(&format!("dynamic_gnomon:cone_{}", axis_name(*axis)), *to);
     }
     for (axis, points) in &shapes.rings {
         if let Some(at) = points.first() {

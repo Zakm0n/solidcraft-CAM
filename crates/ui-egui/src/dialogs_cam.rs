@@ -5,6 +5,7 @@
 //! turns on. Play turns the cam a full turn so the follower shows its motion before OK.
 
 use crate::ui_kit::BackingTooltipExt as _;
+use crate::ui_kit::{Container, Surface};
 use egui::{Painter, Pos2, RichText};
 use serde_json::{Value, json};
 use solidcore_record::Vec3;
@@ -19,7 +20,7 @@ use crate::SolveApp;
 use crate::dialogs::Kind;
 use crate::dialogs::{Dialog, combo, field, form_row};
 use crate::dialogs_assembly::Asm;
-use crate::dynamic_gnomon::{DynamicGnomon, GnomonAlignMode, InputState};
+use crate::dynamic_gnomon::{DynamicGnomon, GnomonActiveState, GnomonAlignMode, GnomonHandle, InputState};
 use crate::selection::{BODIES, EDGES, FACES, PROFILES, SelInput, SelectionExt as _, VERTICES};
 use crate::theme::Tokens;
 use crate::viewport::Proj;
@@ -312,6 +313,50 @@ pub struct DialogCamCoordinateSystem {
     /// The coordinate system this dialog changes (`cam.coordinate_system.edit`); `None` creates
     /// a new one.
     editing: Option<u64>,
+    /// The value a click on an arm the frame draws or on a wheel opened, and that handle. Boxed:
+    /// the entry is open only while its field is, and the dialog is in a small enum.
+    entry: Option<Box<RelativeEntry>>,
+    /// The click mode the gnomon showed last frame, so a new one opens its value entry once.
+    seen: GnomonActiveState,
+}
+
+/// The floating value entry a click on an arm's shaft or a wheel opens: a relative distance
+/// along the shaft, or a relative angle about the wheel.
+#[derive(Clone, Debug)]
+struct RelativeEntry {
+    /// The handle clicked: a shaft ([`GnomonHandle::Translate`]) or a wheel
+    /// ([`GnomonHandle::Rotate`]).
+    handle: GnomonHandle,
+    /// The value as typed, in mm or in degrees.
+    text: String,
+    /// The field still needs the keyboard: true as the entry opens, cleared once it has it.
+    focus: bool,
+}
+
+impl RelativeEntry {
+    /// The row's label: the quantity a value of this handle's entry is.
+    fn label(&self) -> &'static str {
+        match self.handle {
+            GnomonHandle::Rotate(_) => "Angle",
+            _ => "Distance",
+        }
+    }
+
+    /// The unit a value of this entry is typed in.
+    fn unit(&self) -> &'static str {
+        match self.handle {
+            GnomonHandle::Rotate(_) => "deg",
+            _ => "mm",
+        }
+    }
+
+    /// The expression kind this entry's value is read as.
+    fn kind(&self) -> solidcraft_engine::doc::expr::Kind {
+        match self.handle {
+            GnomonHandle::Rotate(_) => solidcraft_engine::doc::expr::Kind::Angle,
+            _ => solidcraft_engine::doc::expr::Kind::Length,
+        }
+    }
 }
 
 impl DialogCamCoordinateSystem {
@@ -326,6 +371,8 @@ impl DialogCamCoordinateSystem {
             origin_z: zero(),
             refresh: false,
             editing: None,
+            entry: None,
+            seen: GnomonActiveState::Idle,
         }
     }
 
@@ -373,6 +420,164 @@ impl DialogCamCoordinateSystem {
 /// A stored point as a frame can use it: `None` when a part is not a finite number.
 fn finite_point(p: [f64; 3]) -> Option<Vec3> {
     p.iter().all(|v| v.is_finite()).then(|| Vec3::new(p[0], p[1], p[2]))
+}
+
+/// Where a click on the frame snaps to: the exact geometry the B-rep holds for the pick, not the
+/// point under the pointer, and the face normal that comes with it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SnapTarget {
+    /// The snap point: a vertex, an edge's midpoint, a circle's centre or a face's centroid.
+    pub point: Vec3,
+    /// A planar face's outward normal, which the frame's Z follows.
+    pub normal: Option<Vec3>,
+}
+
+/// What `sel` snaps to. A vertex is itself; a face its centroid, with the outward normal of its
+/// plane; an edge the middle of its straight line, or the centre of the circle it lies on.
+pub(crate) fn snap_target(app: &SolveApp, sel: &Sel) -> Option<SnapTarget> {
+    let st = crate::open_meshing::session_world(&app.session);
+    match sel {
+        Sel::Vertex { point, .. } => Some(SnapTarget { point: *point, normal: None }),
+        Sel::Face { body, index, point } => {
+            let b = st.body(body)?;
+            let tol = (b.body.size() * 1e-3).max(1e-3);
+            let centroid = b.body.faces(tol).ok().and_then(|f| f.iter().find(|f| f.index == *index).map(|f| f.centroid)).unwrap_or(*point);
+            let normal = match solidcraft_engine::kernel::face_surface(&b.body, *index) {
+                Some(FaceSurface::Plane { normal, .. }) => Some(normal.vec()),
+                _ => None,
+            };
+            Some(SnapTarget { point: centroid, normal })
+        }
+        Sel::Edge { body, index, point } => {
+            let b = st.body(body)?;
+            Some(SnapTarget { point: edge_snap_point(&b.body, *index).unwrap_or(*point), normal: None })
+        }
+        _ => None,
+    }
+}
+
+/// An edge's exact snap point: the middle of a straight edge, the centre of the circle a circular
+/// edge lies on. `None` for any other curve.
+fn edge_snap_point(body: &solidcraft_engine::kernel::Body, index: usize) -> Option<Vec3> {
+    use solidcore_record::brep::Curve;
+    match &body.record().edges.get(index)?.curve {
+        Curve::Line { start, end } => {
+            let mid = (Vec3::new(start[0], start[1], start[2]) + Vec3::new(end[0], end[1], end[2])) * 0.5;
+            (mid.is_finite()).then_some(mid)
+        }
+        Curve::Circle { .. } => solidcraft_engine::kernel::edge_circle(body, index).map(|c| c.center).filter(|c| c.is_finite()),
+        _ => None,
+    }
+}
+
+/// Put the frame's origin on `target`, and its Z along the target's normal when the target came
+/// from a planar face. True when the frame changed.
+fn snap_origin(gnomon: &mut DynamicGnomon, target: SnapTarget) -> bool {
+    let moved = gnomon.set_origin(target.point);
+    let aligned = target.normal.is_some_and(|n| gnomon.set_z_axis(n));
+    moved || aligned
+}
+
+impl DialogCamCoordinateSystem {
+    /// Follow the click the gnomon took: the origin ball turns Origin Snap on, and a shaft or a
+    /// wheel opens its value entry.
+    fn follow_click(&mut self) {
+        let state = self.gnomon.active_state();
+        if state == self.seen {
+            return;
+        }
+        match state {
+            // The ball's click makes the next pick put the origin on it.
+            GnomonActiveState::OriginSnap => {
+                self.gnomon.set_align_mode(GnomonAlignMode::SnapOrigin);
+                self.entry = None;
+            }
+            GnomonActiveState::RelativeInput { handle, .. } => self.entry = Some(Box::new(RelativeEntry { handle, text: String::new(), focus: true })),
+            GnomonActiveState::Idle | GnomonActiveState::AxisOrbit(_) => self.entry = None,
+        }
+        self.seen = state;
+    }
+
+    /// Take a pick for the click mode the gnomon is in, or align the frame as the alignment mode
+    /// says. True when the frame changed.
+    fn take_pick(&mut self, app: &SolveApp, sel: &Sel) -> bool {
+        match self.gnomon.active_state() {
+            GnomonActiveState::OriginSnap => {
+                let Some(target) = snap_target(app, sel) else { return false };
+                let changed = snap_origin(&mut self.gnomon, target);
+                self.end_click();
+                changed
+            }
+            GnomonActiveState::AxisOrbit(axis) => {
+                let Some(target) = snap_target(app, sel) else { return false };
+                let changed = self.gnomon.aim_axis(axis, target.point);
+                self.end_click();
+                changed
+            }
+            GnomonActiveState::Idle | GnomonActiveState::RelativeInput { .. } => align_to(app, self, sel),
+        }
+    }
+
+    /// End the click mode once its pick has been taken, so each click acts once.
+    fn end_click(&mut self) {
+        self.gnomon.set_active_state(GnomonActiveState::Idle);
+        self.seen = GnomonActiveState::Idle;
+        self.entry = None;
+    }
+
+    /// Apply the relative value typed into the entry: move the frame along the arm's shaft, or
+    /// turn it about the wheel. The entry stays open while its value is not a number.
+    fn apply_entry(&mut self, app: &SolveApp) {
+        let Some(entry) = self.entry.as_ref() else { return };
+        let Ok(value) = crate::length_input::eval(&app.session.doc, entry.text.trim(), entry.kind()) else { return };
+        if !value.is_finite() {
+            return;
+        }
+        let handle = entry.handle;
+        self.entry = None;
+        let changed = match handle {
+            GnomonHandle::Translate(axis) => {
+                let direction = self.gnomon.axes()[axis.index()];
+                self.gnomon.translate(direction * value)
+            }
+            GnomonHandle::Rotate(axis) => self.gnomon.rotate(axis, value),
+            GnomonHandle::Origin | GnomonHandle::Cone(_) | GnomonHandle::None => false,
+        };
+        if changed {
+            self.refresh = true;
+        }
+        self.end_click();
+    }
+}
+
+/// The floating value entry a click on a shaft or a wheel opens, at `at` where the click was: its
+/// label and unit, and the keyboard in its field. Enter applies it.
+fn entry_box(app: &SolveApp, ui: &mut egui::Ui, f: &mut DialogCamCoordinateSystem, at: Pos2) {
+    let Some(entry) = f.entry.as_mut() else { return };
+    let t = Tokens::get();
+    let area = egui::Id::unique("zcam_gnomon_entry");
+    let id = egui::Id::unique("zcam_gnomon_entry_value");
+    let mut apply = false;
+    Container::new(ui.ctx(), Surface::Canvas).area(area).fixed_pos(at + egui::vec2(t.space_8, t.space_8)).order(egui::Order::Foreground).show(
+        ui.ctx(),
+        |ui| {
+            let frame = Container::popup_frame(ui.style()).inner_margin(egui::Margin::symmetric(6, 3));
+            Container::show_backing(ui, frame, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(entry.label()).color(t.text_dim).size(t.font_caption));
+                    let field = crate::ui_kit::canvas_value_field(ui, id, &mut entry.text, false);
+                    if std::mem::take(&mut entry.focus) {
+                        field.request_focus();
+                    }
+                    ui.label(RichText::new(entry.unit()).color(t.text_dim).size(t.font_caption));
+                    apply = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                });
+            });
+        },
+    );
+    if apply {
+        f.apply_entry(app);
+    }
 }
 
 /// The dialog's rows: its name, the alignment mode, and the origin's three values.
@@ -454,19 +659,27 @@ fn coordinate_system_commands(f: &DialogCamCoordinateSystem) -> Result<Vec<(Stri
     }
 }
 
-/// Draw the gnomon over the view and take this frame's drag; a pick in the view aligns the frame
-/// to what was picked, as the mode says.
+/// Draw the gnomon over the view and take this frame's drag and clicks; a click opens a mode or a
+/// value entry, and a pick in the view snaps or aligns the frame as the mode says.
 pub fn overlay(app: &mut SolveApp, ui: &mut egui::Ui, painter: &Painter, proj: &Proj, d: &mut Dialog) {
     let Kind::Cam(Zcam::CoordinateSystem(f)) = &mut d.kind else { return };
     let input = InputState::read(ui);
+    // The pick is this view's click on geometry, never the picks of an older mode or a drag. It
+    // comes before this frame's press, so the click that takes a snap does not first end the mode
+    // it snaps in.
+    if let Some(sel) = d.inputs.first_mut().and_then(|i| i.items.drain(..).next())
+        && f.take_pick(app, &sel)
+    {
+        f.refresh = true;
+    }
     if f.gnomon.interact(proj, &input).is_some() {
         f.refresh = true;
     }
-    // The pick is this view's click on geometry, never the picks of an older mode or a drag.
-    if let Some(sel) = d.inputs.first_mut().and_then(|i| i.items.drain(..).next())
-        && align_to(app, f, &sel)
-    {
-        f.refresh = true;
+    // What a click on the ball, a cone, a shaft or a wheel asked for: a snap mode, an orbit mode,
+    // or the floating value entry it sits at.
+    f.follow_click();
+    if let GnomonActiveState::RelativeInput { pos, .. } = f.gnomon.active_state() {
+        entry_box(app, ui, f, pos);
     }
     f.gnomon.draw(painter, proj, &Tokens::get());
 }
@@ -487,10 +700,7 @@ pub(crate) fn gnomon_owns(app: &SolveApp, proj: &Proj, p: Pos2) -> bool {
 pub(crate) fn align_to(app: &SolveApp, f: &mut DialogCamCoordinateSystem, sel: &Sel) -> bool {
     match f.gnomon.align_mode() {
         GnomonAlignMode::Free => false,
-        GnomonAlignMode::SnapOrigin => match sel {
-            Sel::Face { point, .. } | Sel::Edge { point, .. } | Sel::Vertex { point, .. } => f.gnomon.set_origin(*point),
-            _ => false,
-        },
+        GnomonAlignMode::SnapOrigin => snap_target(app, sel).is_some_and(|target| snap_origin(&mut f.gnomon, target)),
         GnomonAlignMode::AlignZFace => match sel {
             Sel::Face { body, index, .. } => planar_normal(app, body, *index).is_some_and(|n| f.gnomon.set_z_axis(n)),
             _ => false,

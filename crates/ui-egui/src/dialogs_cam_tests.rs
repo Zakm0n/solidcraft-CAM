@@ -376,3 +376,217 @@ fn a_construction_plane_seeds_a_coordinate_system() {
     assert_eq!(cmds[0].1["origin"], json!([0.0, 0.0, 20.0]));
     assert_eq!(cmds[0].1["name"], "Shelf");
 }
+
+// The gnomon's click modes, its snaps and its value entry: the frame a click on its origin ball,
+// a cone, an arm's shaft or a wheel opens, and what its pick then does.
+
+use crate::dynamic_gnomon::{Axis, DynamicGnomon, GnomonHandle, InputState};
+use solidcraft_engine::render::Camera;
+
+/// A view where the frame's three arms, cones and wheels stand apart on screen, so a test can
+/// click each of them.
+fn gnomon_projection() -> crate::viewport::Proj {
+    let cam = Camera::default();
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 900.0));
+    // The same view and matrix the viewport makes, so a screen point and its ray agree: a drag
+    // along an arm must move the frame along that arm.
+    let vp = cam.view_proj(rect.width() as f64 / rect.height() as f64, 100.0);
+    crate::viewport::Proj { cam, vp, rect }
+}
+
+fn origin_on_screen(g: &DynamicGnomon, proj: &crate::viewport::Proj) -> egui::Pos2 {
+    proj.to_screen(g.origin()).expect("the frame's origin is in view")
+}
+
+/// The screen direction of model direction `d`, from the frame's origin.
+fn direction_on_screen(g: &DynamicGnomon, proj: &crate::viewport::Proj, d: Vec3) -> egui::Vec2 {
+    let o = g.origin();
+    let from = origin_on_screen(g, proj);
+    let to = proj.to_screen(o + d * 0.05).expect("the arm's far end is in view");
+    (to - from).normalized()
+}
+
+/// The farthest point on `axis`'s arm that takes `want`: a cone, or the shaft beneath it.
+fn on_arm(g: &DynamicGnomon, proj: &crate::viewport::Proj, axis: Axis, want: GnomonHandle) -> egui::Pos2 {
+    let centre = origin_on_screen(g, proj);
+    let d = direction_on_screen(g, proj, g.axes()[axis.index()]);
+    (1..=250)
+        .rev()
+        .map(|r| centre + d * r as f32)
+        .find(|p| g.handle_at(proj, *p) == want)
+        .unwrap_or_else(|| panic!("no {want:?} on the {axis:?} arm"))
+}
+
+/// A point on the wheel about `axis`: a direction square to it where no arm runs.
+fn on_wheel(g: &DynamicGnomon, proj: &crate::viewport::Proj, axis: Axis) -> egui::Pos2 {
+    let frame = g.axes();
+    let (i1, i2) = match axis {
+        Axis::X => (1, 2),
+        Axis::Y => (2, 0),
+        Axis::Z => (0, 1),
+    };
+    let centre = origin_on_screen(g, proj);
+    let d = (direction_on_screen(g, proj, frame[i1]) + direction_on_screen(g, proj, frame[i2])).normalized();
+    (1..=250)
+        .map(|r| centre + d * r as f32)
+        .find(|p| g.handle_at(proj, *p) == GnomonHandle::Rotate(axis))
+        .unwrap_or_else(|| panic!("no {axis:?} wheel in view"))
+}
+
+fn press(g: &mut DynamicGnomon, proj: &crate::viewport::Proj, at: egui::Pos2) {
+    g.interact(proj, &InputState { pointer: Some(at), primary_pressed: true, primary_down: true, primary_released: false, escape: false });
+}
+
+fn release(g: &mut DynamicGnomon, proj: &crate::viewport::Proj, at: egui::Pos2) {
+    g.interact(proj, &InputState { pointer: Some(at), primary_pressed: false, primary_down: false, primary_released: true, escape: false });
+}
+
+/// A click on the ball, a cone, a shaft or a wheel with the pointer held still.
+fn click(g: &mut DynamicGnomon, proj: &crate::viewport::Proj, at: egui::Pos2) {
+    press(g, proj, at);
+    release(g, proj, at);
+}
+
+/// #Z-CAM: clicking the gnomon's origin ball opens Origin Snap Mode, its cones Axis Orbit Mode,
+/// and its shafts and wheels their value entries; a drag that moves places the frame and opens
+/// no mode.
+#[test]
+fn a_click_on_the_gnomon_opens_its_mode_or_its_value_entry() {
+    let proj = gnomon_projection();
+    let mut g = DynamicGnomon::default();
+    let centre = origin_on_screen(&g, &proj);
+    click(&mut g, &proj, centre);
+    assert_eq!(g.active_state(), GnomonActiveState::OriginSnap, "the ball opens Origin Snap Mode");
+    let cone = on_arm(&g, &proj, Axis::X, GnomonHandle::Cone(Axis::X));
+    click(&mut g, &proj, cone);
+    assert_eq!(g.active_state(), GnomonActiveState::AxisOrbit(Axis::X), "a cone opens Axis Orbit Mode");
+    let shaft = on_arm(&g, &proj, Axis::Y, GnomonHandle::Translate(Axis::Y));
+    click(&mut g, &proj, shaft);
+    assert_eq!(g.active_state(), GnomonActiveState::RelativeInput { handle: GnomonHandle::Translate(Axis::Y), pos: shaft });
+    let wheel = on_wheel(&g, &proj, Axis::Z);
+    click(&mut g, &proj, wheel);
+    assert_eq!(g.active_state(), GnomonActiveState::RelativeInput { handle: GnomonHandle::Rotate(Axis::Z), pos: wheel });
+    // A drag along the shaft moves the frame, so it asks for no value.
+    press(&mut g, &proj, shaft);
+    let moved = shaft + direction_on_screen(&g, &proj, Vec3::Y) * 20.0;
+    g.interact(&proj, &InputState { pointer: Some(moved), primary_pressed: false, primary_down: true, primary_released: false, escape: false });
+    release(&mut g, &proj, moved);
+    assert_eq!(g.active_state(), GnomonActiveState::Idle, "a drag opens no mode");
+    assert!(
+        g.origin().x.abs() < 1e-9 && g.origin().z.abs() < 1e-9 && g.origin().y.abs() > 0.01,
+        "the drag moves the frame along its arm only: {:?}",
+        g.origin()
+    );
+    // Escape ends a mode.
+    let centre = origin_on_screen(&g, &proj);
+    click(&mut g, &proj, centre);
+    assert_eq!(g.active_state(), GnomonActiveState::OriginSnap);
+    g.interact(&proj, &InputState { escape: true, ..InputState::default() });
+    assert_eq!(g.active_state(), GnomonActiveState::Idle, "Escape ends the click mode");
+}
+
+/// #Z-CAM: Axis Orbit turns the clicked axis to the picked point, about the short way round, and
+/// keeps the frame square.
+#[test]
+fn an_axis_orbit_turns_the_axis_to_the_point() {
+    let mut g = DynamicGnomon::default();
+    assert!(g.aim_axis(Axis::Y, Vec3::new(0.0, -3.0, 4.0)));
+    assert!(g.y_axis().vec().dist(Vec3::new(0.0, -0.6, 0.8)) < 1e-9, "{:?}", g.y_axis().vec());
+    let a = g.axes();
+    assert!(a[0].dot(a[1]).abs() < 1e-9 && a[1].dot(a[2]).abs() < 1e-9, "the frame stays square: {a:?}");
+    assert!(!g.aim_axis(Axis::X, g.origin()), "the frame's own origin names no direction");
+}
+
+/// A box 10 mm on a side, and its body's name.
+fn block() -> (SolveApp, String) {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    app.run("solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Block"})).unwrap();
+    let body = app.session.world_state().unwrap().bodies[0].name.clone();
+    (app, body)
+}
+
+/// #Z-CAM: a snap uses exact geometry: a face's centroid and outward normal, a straight edge's
+/// midpoint, and the centre of the circle a circular edge lies on.
+#[test]
+fn a_snap_uses_the_centroid_midpoint_and_circle_centre() {
+    let (app, body) = block();
+    let st = app.session.world_state().unwrap();
+    let faces = st.body(&body).unwrap().body.faces(0.01).unwrap();
+    let top = faces.iter().find(|f| f.plane_normal.is_some_and(|n| n.z > 0.999)).expect("the box's top face").index;
+    let snap = super::snap_target(&app, &Sel::Face { body: body.clone(), index: top, point: Vec3::new(1.0, 2.0, 10.0) }).expect("a face snaps");
+    assert!(snap.point.dist(Vec3::new(5.0, 5.0, 10.0)) < 1e-6, "the face's centroid: {:?}", snap.point);
+    assert_eq!(snap.normal, Some(Vec3::Z), "a planar face gives its outward normal");
+    let st = app.session.world_state().unwrap();
+    let b = st.body(&body).unwrap();
+    let (edge, mid) = (0..b.body.record().edges.len())
+        .find_map(|i| match &b.body.record().edges[i].curve {
+            solidcore_record::brep::Curve::Line { start, end } => {
+                let mid = (Vec3::new(start[0], start[1], start[2]) + Vec3::new(end[0], end[1], end[2])) * 0.5;
+                Some((i, mid))
+            }
+            _ => None,
+        })
+        .expect("a straight edge");
+    let snap = super::snap_target(&app, &Sel::Edge { body: body.clone(), index: edge, point: Vec3::ZERO }).expect("an edge snaps");
+    assert!(snap.point.dist(mid) < 1e-9, "a straight edge snaps to its midpoint: {:?} for {mid:?}", snap.point);
+    assert_eq!(snap.normal, None, "an edge gives no normal");
+    // A cylinder's rim is a circle: a pick on it snaps to the circle's centre.
+    let mut app = app;
+    app.run("solid.cylinder", json!({"base": [30, 0, 0], "axis": [0, 0, 1], "radius": 4, "height": 10, "body_name": "Pin"})).unwrap();
+    let st = app.session.world_state().unwrap();
+    let pin = st.body("Pin").expect("the pin's body");
+    let (circular, centre) = (0..pin.body.record().edges.len())
+        .find_map(|i| Some((i, solidcraft_engine::kernel::edge_circle(&pin.body, i)?.center)))
+        .expect("a circular edge");
+    let snap = super::snap_target(&app, &Sel::Edge { body: "Pin".into(), index: circular, point: Vec3::ZERO }).expect("a circular edge snaps");
+    assert!(snap.point.dist(centre) < 1e-9, "a circular edge snaps to its circle's centre: {:?} for {centre:?}", snap.point);
+}
+
+/// #Z-CAM: the origin ball's click turns Origin Snap on, and its pick puts the origin on the
+/// face's centroid and the frame's Z on the face's outward normal, once.
+#[test]
+fn an_origin_snap_centres_a_face_and_turns_its_z_to_the_normal() {
+    let (app, body) = block();
+    let st = app.session.world_state().unwrap();
+    let top = st
+        .body(&body)
+        .unwrap()
+        .body
+        .faces(0.01)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.plane_normal.is_some_and(|n| n.z > 0.999))
+        .expect("the box's top face")
+        .index;
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.coordinate_system.create").expect("the dialog opens");
+    let Kind::Cam(Zcam::CoordinateSystem(f)) = &mut d.kind else { panic!("the dialog's kind") };
+    f.gnomon.set_active_state(GnomonActiveState::OriginSnap);
+    f.follow_click();
+    assert_eq!(f.gnomon.align_mode(), GnomonAlignMode::SnapOrigin, "the ball's click turns Origin Snap on");
+    assert!(f.take_pick(&app, &Sel::Face { body, index: top, point: Vec3::new(1.0, 2.0, 10.0) }));
+    assert!(f.gnomon.origin().dist(Vec3::new(5.0, 5.0, 10.0)) < 1e-6, "{:?}", f.gnomon.origin());
+    assert!(f.gnomon.z_axis().vec().dist(Vec3::Z) < 1e-9, "the face's outward normal, not its inward one: {:?}", f.gnomon.z_axis().vec());
+    assert_eq!(f.gnomon.active_state(), GnomonActiveState::Idle, "one pick per click");
+}
+
+/// #Z-CAM: the value entry a shaft's or a wheel's click opens moves the frame a relative distance
+/// along the arm, or turns it a relative angle about the wheel.
+#[test]
+fn the_value_entry_moves_the_frame_or_turns_it() {
+    let app = SolveApp::new(Session::default(), Services::default());
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.coordinate_system.create").expect("the dialog opens");
+    let Kind::Cam(Zcam::CoordinateSystem(f)) = &mut d.kind else { panic!("the dialog's kind") };
+    f.entry = Some(Box::new(RelativeEntry { handle: GnomonHandle::Translate(Axis::X), text: "5".into(), focus: false }));
+    f.apply_entry(&app);
+    assert_eq!(f.gnomon.origin(), Vec3::new(5.0, 0.0, 0.0), "5 mm along +X");
+    assert!(f.entry.is_none(), "the entry closes once its value is taken");
+    f.entry = Some(Box::new(RelativeEntry { handle: GnomonHandle::Rotate(Axis::Z), text: "90 deg".into(), focus: false }));
+    f.apply_entry(&app);
+    assert!(f.gnomon.x_axis().vec().dist(Vec3::Y) < 1e-9, "+X turns to +Y: {:?}", f.gnomon.x_axis().vec());
+    assert_eq!(f.gnomon.origin(), Vec3::new(5.0, 0.0, 0.0), "turning moves no origin");
+    // A value that is not a number keeps the entry open.
+    f.entry = Some(Box::new(RelativeEntry { handle: GnomonHandle::Translate(Axis::Y), text: "not a number".into(), focus: false }));
+    f.apply_entry(&app);
+    assert!(f.entry.is_some(), "an unreadable value keeps the entry open");
+    assert_eq!(f.gnomon.origin(), Vec3::new(5.0, 0.0, 0.0));
+}
