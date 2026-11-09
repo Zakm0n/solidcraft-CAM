@@ -2429,7 +2429,16 @@ pub(crate) fn plane_name_problem(name: &str) -> Option<String> {
 
 /// The forms [`plane_param`] takes, for its messages.
 pub(crate) const PLANE_FORMS: &str =
-    "XY, XZ, YZ, a construction plane name or id, or {origin, normal} (origin coordinates may be length expressions)";
+    "XY, XZ, YZ, a construction plane name or id, a coordinate system's id (its own XY plane), or {origin, normal} (origin coordinates may be length expressions)";
+
+/// The XY plane of the coordinate system whose id is written as a string: its origin, and its
+/// own X and Y as the plane's axes. `None` when no coordinate system has that id.
+fn coordinate_system_plane(s: &Session, name: &str) -> Option<solidcore_record::Plane> {
+    let id: u64 = name.parse().ok()?;
+    let cs = s.doc.coordinate_systems.iter().find(|c| c.id == id)?;
+    let v = |a: [f64; 3]| Vec3::new(a[0], a[1], a[2]);
+    solidcore_record::Plane::new(v(cs.origin), v(cs.x_axis), v(cs.y_axis))
+}
 
 /// The plane an explicit plane object gives through `origin`, as [`plane_param`] reads it: from
 /// `x_dir` and `y_dir` when both are points, else from `normal`; `None` when they don't make one.
@@ -2470,7 +2479,16 @@ pub(super) fn plane_param(s: &Session, v: Option<&Value>, cmd: &str) -> Result<s
             }
             Ok(PlaneRef::Origin { name: n.trim().to_ascii_uppercase() })
         }
-        Some(Value::String(n)) => construction(n.trim()),
+        Some(Value::String(n)) => {
+            let name = n.trim();
+            // A coordinate system's own XY plane, named by the system's id: the browser's
+            // Create Sketch sends `plane` that way, so the sketch keeps the frame's origin and
+            // axes. A construction plane of the same name still wins.
+            construction(name).or_else(|why| match coordinate_system_plane(s, name) {
+                Some(plane) => Ok(PlaneRef::Custom { plane }),
+                None => Err(why),
+            })
+        }
         Some(Value::Number(id)) => match id.as_u64() {
             Some(id) => construction(&id.to_string()),
             None => Err(bad(cmd, format!("`plane` must be {WANT}"))),

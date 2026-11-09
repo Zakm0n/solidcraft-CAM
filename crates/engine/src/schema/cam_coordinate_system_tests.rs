@@ -4,6 +4,8 @@ use super::{CoordinateSystemCreated, CoordinateSystemDeleted, CoordinateSystemEd
 use crate::Session;
 use crate::schema::tests::{assert_keys, assert_strict_keeps_todays_errors, conforms};
 use crate::schema::{ParamCheck, input_schema_for, output_schema_for};
+use solidcore_record::{Vec2, Vec3};
+use solidcraft_geom::prelude::*;
 
 #[test]
 fn schemas_and_the_key_check_agree() {
@@ -143,4 +145,22 @@ fn visibility_hides_and_shows_a_coordinate_system() {
     assert_eq!(s.visibility.hidden_coordinate_systems, vec![id]);
     s.execute("browser.visibility", &json!({"items": ["Top"], "visible": true})).unwrap();
     assert!(s.visibility.hidden_coordinate_systems.is_empty(), "a name finds the coordinate system too");
+}
+
+/// #Z-CAM: the browser's Create Sketch names the plane by the coordinate system's id, as a
+/// string; `sketch.create` reads it as the frame's own XY plane, origin and axes included.
+#[test]
+fn a_sketch_on_a_coordinate_system_keeps_the_frames_origin_and_axes() {
+    let mut s = Session::default();
+    let id = s
+        .execute("cam.coordinate_system.create", &json!({"origin": [10, 20, 30], "x_axis": [0, 1, 0], "z_axis": [1, 0, 0], "name": "Stock"}))
+        .unwrap()["coordinate_system"]
+        .as_u64()
+        .unwrap();
+    let sketch = s.execute("sketch.create", &json!({"plane": id.to_string()})).unwrap()["sketch"].as_u64().unwrap();
+    let plane = s.model.state().sketch(sketch).expect("an evaluated sketch").plane;
+    let close = |a: Vec3, b: Vec3| a.dist(b) < 1e-9;
+    assert!(close(plane.to_world(Vec2::new(0.0, 0.0)), Vec3::new(10.0, 20.0, 30.0)), "{plane:?}");
+    assert!(close(plane.dir_to_world(Vec2::new(1.0, 0.0)), Vec3::Y), "the sketch x runs along the frame's X");
+    assert!(close(plane.dir_to_world(Vec2::new(0.0, 1.0)), Vec3::Z), "the sketch y runs along the frame's Y");
 }

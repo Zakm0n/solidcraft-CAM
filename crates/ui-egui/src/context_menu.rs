@@ -1925,6 +1925,11 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
                 crate::browser::coordinate_system_named_view(app, id);
             }
         }
+        "ui.coordinateSystemPlane" => {
+            if let Some(id) = id_of(&p, "coordinate_system") {
+                crate::browser::coordinate_system_to_plane(app, id);
+            }
+        }
         "ui.coordinateSystemVisibility" => {
             let Some(id) = id_of(&p, "coordinate_system") else { return };
             let visible = p.get("show").and_then(Value::as_bool).unwrap_or(true);

@@ -2249,16 +2249,16 @@ fn coordinate_system_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize, a
 }
 
 /// A coordinate system's browser menu: edit its frame and name, delete it, rename it, show or
-/// hide its triad, sketch on it, or save a named view that looks along its Z.
+/// hide its triad, sketch on it, turn it into a construction plane, or save a named view that
+/// looks along its Z.
 pub fn coordinate_system_items(app: &SolveApp, id: u64) -> Vec<Item> {
     let Some(cs) = app.session.doc.coordinate_systems.iter().find(|c| c.id == id) else { return Vec::new() };
     let visible = !app.session.visibility.hidden_coordinate_systems.contains(&id);
-    let point = |v: [f64; 3]| json!([v[0], v[1], v[2]]);
     let items = vec![
-        // A sketch on the frame's own XY plane, through the frame's origin and directions.
-        cmd(app, "sketch.create", "Create Sketch").with(json!({
-            "plane": { "origin": point(cs.origin), "x_dir": point(cs.x_axis), "y_dir": point(cs.y_axis) },
-        })),
+        // A sketch on the frame's own XY plane. The plane is named by the system's id, a string
+        // the selection and `sketch.create` both accept; the engine reads it as the frame.
+        cmd(app, "sketch.create", "Create Sketch").with(json!({ "plane": cs.id.to_string() })),
+        act("ui.coordinateSystemPlane", "Convert to Plane", "plane").with(json!({ "coordinate_system": id })),
         Item::sep(),
         act("ui.editCoordinateSystem", "Edit Feature", "edit").with(json!({ "coordinate_system": id })),
         Item::sep(),
@@ -2305,9 +2305,40 @@ pub fn coordinate_system_from_plane(app: &mut SolveApp, feature: u64) {
     app.dialog = Some(d);
 }
 
+/// Make a construction plane from a coordinate system: the frame's origin, X and Y become the
+/// plane's own, named `CS Plane: <name>`, so it can be sketched on, offset or turned like any
+/// other datum plane.
+pub fn coordinate_system_to_plane(app: &mut SolveApp, id: u64) {
+    let Some(cs) = app.session.doc.coordinate_systems.iter().find(|c| c.id == id) else { return };
+    let point = |v: [f64; 3]| json!([v[0], v[1], v[2]]);
+    let name = coordinate_system_plane_name(&app.session.doc, &cs.name);
+    let _ = app.run(
+        "construct.plane.offset",
+        json!({
+            "base": { "origin": point(cs.origin), "x_dir": point(cs.x_axis), "y_dir": point(cs.y_axis) },
+            "offset": 0,
+            "name": name,
+        }),
+    );
+}
+
+/// A construction plane's name for a coordinate system: `CS Plane: <name>`, with ` (1)`, ` (2)`,
+/// … appended when that name is taken, so converting the same system twice never fails.
+fn coordinate_system_plane_name(doc: &solidcraft_engine::doc::Document, cs_name: &str) -> String {
+    let taken = |name: &str| doc.features.iter().any(|f| f.name == name);
+    let mut name = format!("CS Plane: {cs_name}");
+    let mut counter = 1;
+    while taken(&name) {
+        name = format!("CS Plane: {cs_name} ({counter})");
+        counter += 1;
+    }
+    name
+}
+
 /// Save the current camera as a named view that looks along the coordinate system's Z, with its
-/// X across the screen: the view a part is machined from. The view is named `CS:<name>`, with
-/// ` (1)`, ` (2)`, … appended when that name is taken; the coordinate system itself stays.
+/// X across the screen and its Y up: the view a part is machined from. The view is named
+/// `CS:<name>`, with ` (1)`, ` (2)`, … appended when that name is taken; the coordinate system
+/// itself stays.
 pub fn coordinate_system_named_view(app: &mut SolveApp, id: u64) {
     let Some(cs) = app.session.doc.coordinate_systems.iter().find(|c| c.id == id) else { return };
     let camera = camera_along(&app.cam, cs);
@@ -2331,22 +2362,17 @@ fn coordinate_system_view_name(doc: &solidcraft_engine::doc::Document, cs_name: 
 }
 
 /// A camera looking along the coordinate system's own −Z at its origin, with its +X across the
-/// screen and the view's present distance kept. It is the view a part is machined from.
+/// screen and its +Y up. It is the view a part is machined from.
+///
+/// `looking_from` takes the target → eye direction in the camera's own up frame, so a Y-up world
+/// turns the same way as a Z-up one; the roll that puts the frame's X across the screen is then
+/// fixed by `square_sketch_axes`, which also handles a frame whose Z points along the world's up.
 fn camera_along(cam: &solidcraft_engine::render::Camera, cs: &solidcraft_engine::doc::cam::CoordinateSystem) -> serde_json::Value {
-    let z = solidcore_record::Vec3::new(cs.z_axis[0], cs.z_axis[1], cs.z_axis[2]);
-    let x = solidcore_record::Vec3::new(cs.x_axis[0], cs.x_axis[1], cs.x_axis[2]);
-    let origin = solidcore_record::Vec3::new(cs.origin[0], cs.origin[1], cs.origin[2]);
-    // `Camera::back` from yaw and pitch: back = (−sin y · cos p, −cos y · cos p, sin p).
-    let unit = z.normalized().unwrap_or(solidcore_record::Vec3::Z);
-    let pitch = unit.z.clamp(-1.0, 1.0).asin();
-    let yaw = (-unit.x).atan2(-unit.y);
-    let mut camera = solidcraft_engine::render::Camera { target: origin, yaw, pitch, roll: 0.0, distance: cam.distance, fov: cam.fov, up: cam.up };
-    // Roll the view so the frame's +X runs across the screen, as the machine's X does.
-    let (right, up, _) = camera.basis();
-    let along = x - unit * x.dot(unit);
-    if along.normalized().is_some() {
-        camera.roll = along.dot(up).atan2(along.dot(right));
-    }
+    let v = |a: [f64; 3]| solidcore_record::Vec3::new(a[0], a[1], a[2]);
+    // The eye sits on +Z, so the view looks along −Z.
+    let mut camera = cam.looking_from(v(cs.z_axis));
+    camera.target = v(cs.origin);
+    let camera = crate::dialogs::square_sketch_axes(camera, v(cs.x_axis), v(cs.y_axis));
     serde_json::to_value(camera).unwrap_or(serde_json::Value::Null)
 }
 

@@ -86,7 +86,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("units: mm|cm|m|in|ft (display and unit-less parameters; values keep their meaning)"),
     CommandSpec::new("view.save", "New Named View", view_save)
         .icon("camera")
-        .params("name?; camera: {target: [x,y,z], yaw, pitch, distance, fov?} (replaces a view of the same name)"),
+        .params("name?; camera: {target: [x,y,z], yaw, pitch, roll?, distance, fov?} (replaces a view of the same name)"),
     CommandSpec::new("view.rename", "Rename Named View", view_rename).icon("rename").params("view: name, name"),
     CommandSpec::new("view.delete", "Delete Named View", view_delete).icon("delete").params("view: name"),
     CommandSpec::new("view.list", "List Named Views", view_list).icon("list").noundo().doc_only(),
@@ -1130,9 +1130,9 @@ fn view_apply(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({ "camera": cam }))
 }
 
-/// The orbit camera of a named view (Z up, no roll).
+/// The orbit camera of a named view (Z up, keeping the roll it was saved with).
 fn camera_of(v: &solidcraft_doc::NamedView) -> crate::render::Camera {
-    crate::render::Camera { target: v.target, yaw: v.yaw, pitch: v.pitch, distance: v.distance, fov: v.fov, ..Default::default() }
+    crate::render::Camera { target: v.target, yaw: v.yaw, pitch: v.pitch, roll: v.roll, distance: v.distance, fov: v.fov, ..Default::default() }
 }
 
 fn view_index(s: &Session, p: &Value, cmd: &str) -> Result<usize> {

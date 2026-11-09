@@ -983,7 +983,7 @@ impl JsonSchema for PlaneParam {
         let point = generator.subschema_for::<Point3>();
         let origin = generator.subschema_for::<PointExpr3>();
         json_schema!({
-            "description": "A plane: XY, XZ or YZ (or Top, Front or Right; any case), a construction plane's name or feature id, or an explicit plane {\"origin\"?, \"x_dir\", \"y_dir\"} or {\"origin\"?, \"normal\"}: directions [x, y, z] (two that aren't parallel, or a normal that isn't zero; the two directions win over normal when both are points) and an origin in mm, each coordinate a number or a length expression (default: the origin).",
+            "description": "A plane: XY, XZ or YZ (or Top, Front or Right; any case), a construction plane's name or feature id, a coordinate system's id written as a string (its own XY plane), or an explicit plane {\"origin\"?, \"x_dir\", \"y_dir\"} or {\"origin\"?, \"normal\"}: directions [x, y, z] (two that aren't parallel, or a normal that isn't zero; the two directions win over normal when both are points) and an origin in mm, each coordinate a number or a length expression (default: the origin).",
             "anyOf": [
                 {"type": "string"},
                 {"type": "integer", "minimum": 0, "maximum": u64::MAX},

@@ -1319,7 +1319,7 @@ fn construction_plane_row_opens_its_menu() {
     assert_eq!(menu["open"], true, "{menu}");
     assert_eq!(menu["target"], json!({"type": "plane", "id": id}), "{menu}");
     let labels: Vec<&str> = menu["items"].as_array().unwrap().iter().filter_map(|i| i["label"].as_str()).filter(|l| !l.is_empty()).collect();
-    assert_eq!(labels, ["Create Sketch", "Edit Feature", "Delete", "Rename", "Show/Hide", "Find in Timeline"]);
+    assert_eq!(labels, ["Create Sketch", "Convert to Coordinate System", "Edit Feature", "Delete", "Rename", "Show/Hide", "Find in Timeline"]);
     assert_eq!(h.app.session.selection, vec![solidcraft_engine::Sel::Plane { name: "Cut".into() }], "the right-click picks the plane");
     context_menu::close(&mut h.app);
 
@@ -2322,7 +2322,7 @@ fn a_coordinate_system_menu_edits_renames_and_hides_it() {
     let mut app = SolveApp::new(s, Services::default());
     let target = Target::CoordinateSystem { id };
     let items = context_menu::items(&app, &target);
-    for label in ["Create Sketch", "Edit Feature", "Delete", "Rename", "Show/Hide", "Convert to Named View"] {
+    for label in ["Create Sketch", "Convert to Plane", "Edit Feature", "Delete", "Rename", "Show/Hide", "Convert to Named View"] {
         assert!(items.iter().any(|item| item.label == label), "no `{label}`: {:?}", items.iter().map(|item| &item.label).collect::<Vec<_>>());
     }
     // Rename opens the browser's rename box, and the typed name goes through the edit command.
@@ -2376,4 +2376,76 @@ fn a_coordinate_system_a_setup_works_from_cannot_be_deleted() {
     let delete = find(&context_menu::items(&app, &Target::CoordinateSystem { id }), "Delete");
     assert!(!delete.enabled, "a setup works from it");
     assert!(delete.tip.as_ref().is_some_and(|tip| tip.contains("setup")), "{delete:?}");
+}
+
+/// #Z-CAM: a coordinate system's named view looks along its −Z with its +X across the screen and
+/// its +Y up, whatever way the world is turned; the roll that squares the frame is saved with it.
+#[test]
+fn a_coordinate_systems_named_view_squares_its_axes_on_screen() {
+    let mut s = Session::default();
+    let id = s
+        .execute(
+            "cam.coordinate_system.create",
+            &json!({"origin": [10, 20, 30], "x_axis": [0, 0, 1], "z_axis": [1, 1, 0], "name": "Stock"}),
+        )
+        .unwrap()["coordinate_system"]
+        .as_u64()
+        .unwrap();
+    let mut app = SolveApp::new(s, Services::default());
+    crate::browser::coordinate_system_named_view(&mut app, id);
+    let v = app.session.doc.named_views.first().expect("the named view");
+    let cam = solidcraft_engine::render::Camera {
+        target: v.target,
+        yaw: v.yaw,
+        pitch: v.pitch,
+        roll: v.roll,
+        distance: v.distance,
+        fov: v.fov,
+        ..Default::default()
+    };
+    let (right, up, back) = cam.basis();
+    let close = |a: Vec3, b: Vec3| a.dist(b) < 1e-9;
+    assert!(close(cam.target, Vec3::new(10.0, 20.0, 30.0)), "{cam:?}");
+    let r = std::f64::consts::FRAC_1_SQRT_2;
+    let z = Vec3::new(r, r, 0.0);
+    assert!(close(back, z), "the view looks along the frame's −Z, so its back is +Z: {back:?}");
+    assert!(close(right, Vec3::Z), "the frame's +X runs right: {right:?}");
+    assert!(close(up, Vec3::new(r, -r, 0.0)), "the frame's +Y runs up: {up:?}");
+}
+
+/// #Z-CAM: Create Sketch on a coordinate system sketches on its own XY plane (through its origin,
+/// with its axes), and Convert to Plane makes a datum plane of the same frame.
+#[test]
+fn a_coordinate_system_sketches_on_its_frame_and_converts_to_a_plane() {
+    let mut h = crate::scenario::Harness::new();
+    let id = h
+        .app
+        .run(
+            "cam.coordinate_system.create",
+            json!({"origin": [10, 20, 30], "x_axis": [0, 1, 0], "z_axis": [1, 0, 0], "name": "Stock"}),
+        )
+        .unwrap()["coordinate_system"]
+        .as_u64()
+        .unwrap();
+    let t = Target::CoordinateSystem { id };
+    act(&mut h.app, &t, "Create Sketch");
+    h.frames(3);
+    let plane = {
+        let st = h.app.session.world_state().unwrap();
+        h.app.session.active_sketch.and_then(|s| st.sketch(s)).map(|s| s.plane).expect("a sketch on the frame")
+    };
+    let close = |a: Vec3, b: Vec3| a.dist(b) < 1e-9;
+    assert!(close(plane.origin, Vec3::new(10.0, 20.0, 30.0)), "{plane:?}");
+    assert!(close(plane.x, Vec3::Y), "the sketch x runs along the frame's X: {plane:?}");
+    assert!(close(plane.y, Vec3::Z), "the sketch y runs along the frame's Y: {plane:?}");
+    h.app.run("sketch.finish", json!({})).unwrap();
+
+    act(&mut h.app, &t, "Convert to Plane");
+    let (_, name, made) = solidcraft_engine::view::construction_planes(&h.app.session)
+        .into_iter()
+        .find(|(_, name, _)| name == "CS Plane: Stock")
+        .expect("the construction plane is made and named after the coordinate system");
+    assert_eq!(name, "CS Plane: Stock");
+    assert!(close(made.origin, Vec3::new(10.0, 20.0, 30.0)), "{made:?}");
+    assert!(close(made.x, Vec3::Y) && close(made.y, Vec3::Z), "the plane keeps the frame's axes: {made:?}");
 }

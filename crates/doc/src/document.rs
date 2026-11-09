@@ -3333,7 +3333,7 @@ impl Visibility {
     }
 }
 
-/// A saved camera (orbit camera: target, yaw, pitch, distance; `fov` 0 for orthographic).
+/// A saved camera (orbit camera: target, yaw, pitch, roll, distance; `fov` 0 for orthographic).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NamedView {
     #[serde(default)]
@@ -3341,6 +3341,10 @@ pub struct NamedView {
     pub target: solidcore_record::Vec3,
     pub yaw: f64,
     pub pitch: f64,
+    /// Rotation about the viewing direction; 0 keeps the world's up axis vertical. Saved so a
+    /// view taken from a coordinate system keeps its own axes square on screen.
+    #[serde(default)]
+    pub roll: f64,
     pub distance: f64,
     #[serde(default)]
     pub fov: f64,
