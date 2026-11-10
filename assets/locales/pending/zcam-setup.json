@@ -1,9 +1,9 @@
 {
   "en": {
     "cmd.cam.setup.create": "Setup",
-    "TOOLPATH": "Toolpath",
-    "2D MILLING": "2D Milling",
-    "3D MILLING": "3D Milling",
+    "TOOLPATH": "TOOLPATH",
+    "2D MILLING": "2D MILLING",
+    "3D MILLING": "3D MILLING",
     "SETUP": "SETUP",
     "TOOL LIBRARY": "TOOL LIBRARY",
     "Coordinate system": "Coordinate system",

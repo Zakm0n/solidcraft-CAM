@@ -1810,6 +1810,28 @@ pub(super) fn exact_box(body: &Body) -> Option<Aabb3> {
     (!b.is_empty() && b.min.is_finite() && b.max.is_finite()).then(|| b.inflated(2.0 * body.record().tolerance + 1e-6))
 }
 
+/// Whether `p` lies farther than `reach` from the exact box of `mb` ([`exact_box`]), and so
+/// from every point of the body. Unknown is never.
+pub(super) fn point_beyond_reach(mb: &ModelBody, p: Vec3, reach: f64) -> bool {
+    let Some(b) = exact_box(&mb.body) else { return false };
+    let off = (b.min - p).max(p - b.max).max(Vec3::ZERO);
+    off.len() > reach
+}
+
+/// Whether [`kernel::cylinder_face_at`] is known to find no face of `mb` at `p`. It takes a
+/// face only when the body's mesh comes within a twentieth of the body's size of the point,
+/// and that mesh lies within its chord tolerance (a thousandth of the size) of the exact body:
+/// a point farther than both from the body's exact box finds no face. Working that out spares
+/// a tessellation of every body in the design for each tap marking (#10227). A mesh body, and a
+/// body whose box is unknown, are searched as before.
+pub(super) fn beyond_cylinder_reach(mb: &ModelBody, p: Vec3) -> bool {
+    if mb.body.is_mesh() {
+        return false;
+    }
+    let size = mb.body.size();
+    point_beyond_reach(mb, p, size * 0.05 + 2.0 * (size * 1e-3).max(1e-3))
+}
+
 /// Whether the line through `at` along `dir` is known to pass farther than `reach` from the
 /// exact box of `mb` ([`exact_box`]) everywhere, and so from every point of the body. Unknown is
 /// never.

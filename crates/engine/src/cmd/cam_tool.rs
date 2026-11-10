@@ -30,6 +30,7 @@ const MAX_TOOLS: usize = 1000;
 
 pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.tool.create", "Tool", crate::checked!("cam.tool.create", create))
+        .icon("new")
         .doc_only()
         .contract(&CREATE_CONTRACT)
         .output(output_schema_for::<ToolReply>)
@@ -37,6 +38,7 @@ pub static COMMANDS: &[CommandSpec] = &[
             "diameter: mm, above 0 and at most 1000; name?: 1–128 characters (default: \"Tool\" and the first free number); kind?: flat_end_mill (default) | ball_end_mill | bull_nose_end_mill; corner_radius?: mm (default: 0, or half the diameter for a ball-nose cutter); flute_length?: mm, 0 to 1000 (default 0: not stated); flutes?: whole number 0 to 100 (default 0: not stated)",
         ),
     CommandSpec::new("cam.tool.edit", "Edit Tool", crate::checked!("cam.tool.edit", edit))
+        .icon("edit")
         .doc_only()
         .contract(&EDIT_CONTRACT)
         .output(output_schema_for::<ToolReply>)
