@@ -201,9 +201,8 @@ pub fn take_incremental_keys(ui: &egui::Ui, field: egui::Id, open: bool) -> Incr
     if !open || !ui.memory(|memory| memory.has_focus(field) || memory.had_focus_last_frame(field)) {
         return IncrementalKeys::default();
     }
-    let (apply, dismiss) = ui.input_mut(|input| {
-        (input.consume_key(egui::Modifiers::NONE, egui::Key::Enter), input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-    });
+    let (apply, dismiss) = ui
+        .input_mut(|input| (input.consume_key(egui::Modifiers::NONE, egui::Key::Enter), input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)));
     IncrementalKeys { active: true, apply, dismiss }
 }
 

@@ -454,17 +454,16 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
             // Render and CAM need no sketch, tool or dialog to be open.
             let ready = app.session.active_sketch.is_none() && app.tool.is_none() && app.dialog.is_none() && !app.file_load.busy();
             vec![
-                act("ui.workspace.design", "Design", "ws_design")
-                    .with(json!({"workspace":"design"}))
-                    .key(if rendering || cam { "" } else { "current" }),
+                act("ui.workspace.design", "Design", "ws_design").with(json!({"workspace":"design"})).key(if rendering || cam {
+                    ""
+                } else {
+                    "current"
+                }),
                 act("ui.workspace.render", "Render", "ws_render")
                     .with(json!({"workspace":"render"}))
                     .key(if rendering { "current" } else { "" })
                     .on(ready),
-                act("ui.workspace.cam", "CAM", "cam")
-                    .with(json!({"workspace":"cam"}))
-                    .key(if cam { "current" } else { "" })
-                    .on(ready),
+                act("ui.workspace.cam", "CAM", "cam").with(json!({"workspace":"cam"})).key(if cam { "current" } else { "" }).on(ready),
                 // Listed, but not available until it is built.
                 act("ui.workspace.machine_simulation", "Machine Simulation", "ws_animate").key("coming later").on(false),
             ]
@@ -3545,10 +3544,8 @@ mod workspace_menu_tests {
         h.call("ui.resize", json!({"width":1200,"height":1000}));
         h.step(&json!({"click":{"handle":"ribbon:workspace"}})).unwrap();
         let opener = rect_of("ribbon:workspace").unwrap();
-        let rows: Vec<_> = ["design", "render", "cam", "machine-simulation"]
-            .iter()
-            .map(|slug| rect_of(&format!("workspace:menu:{slug}")).unwrap())
-            .collect();
+        let rows: Vec<_> =
+            ["design", "render", "cam", "machine-simulation"].iter().map(|slug| rect_of(&format!("workspace:menu:{slug}")).unwrap()).collect();
         assert!(rows.windows(2).all(|pair| pair[0].bottom() <= pair[1].top()));
         assert!(rows[0].top() > opener.bottom());
         assert_eq!(rows[0].width(), 450.0);

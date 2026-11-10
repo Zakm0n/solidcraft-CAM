@@ -294,8 +294,7 @@ fn the_tool_library_dialog_creates_and_edits_tools() {
 #[test]
 fn the_coordinate_system_dialog_places_the_frame() {
     let mut app = SolveApp::new(Session::default(), Services::default());
-    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.coordinate_system.create")
-        .expect("the Coordinate System command opens a dialog");
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.coordinate_system.create").expect("the Coordinate System command opens a dialog");
     {
         let Kind::Cam(Zcam::CoordinateSystem(f)) = &mut d.kind else {
             panic!("cam.coordinate_system.create has the wrong dialog");
@@ -707,10 +706,7 @@ fn the_ball_the_shaft_and_the_cone_never_steal_each_others_clicks() {
     assert!(origin < shaft && shaft < cone, "the regions run origin, shaft, cone: {walked:?}");
     assert!(walked[..origin].iter().all(|(_, h)| *h == GnomonHandle::None), "nothing comes before the ball: {walked:?}");
     // Past the first cone point the shaft never returns: the arrowhead owns its tip outright.
-    assert!(
-        !walked[cone..].iter().any(|(_, h)| *h == GnomonHandle::Translate(Axis::X)),
-        "no shaft press inside the arrowhead: {walked:?}"
-    );
+    assert!(!walked[cone..].iter().any(|(_, h)| *h == GnomonHandle::Translate(Axis::X)), "no shaft press inside the arrowhead: {walked:?}");
     assert!(walked[cone..].iter().any(|(_, h)| *h == GnomonHandle::Cone(Axis::X)), "the arrowhead takes its tip");
 }
 
@@ -873,10 +869,24 @@ fn live_snap_candidates_hold_the_vertices_midpoints_and_face_centres() {
     let (app, _body) = block();
     let candidates = super::snap_candidates(&app);
     let there = |p: Vec3| candidates.iter().any(|c| c.point.dist(p) < 1e-6);
-    let corners: Vec<Vec3> = [0.0, 10.0].into_iter().flat_map(|x| [0.0, 10.0].into_iter().flat_map(move |y| [0.0, 10.0].map(move |z| Vec3::new(x, y, z)))).collect();
+    let corners: Vec<Vec3> =
+        [0.0, 10.0].into_iter().flat_map(|x| [0.0, 10.0].into_iter().flat_map(move |y| [0.0, 10.0].map(move |z| Vec3::new(x, y, z)))).collect();
     assert_eq!(corners.len(), 8);
     assert!(corners.iter().all(|p| there(*p)), "every vertex is a candidate");
-    let midpoints = [Vec3::new(5.0, 0.0, 0.0), Vec3::new(5.0, 10.0, 0.0), Vec3::new(5.0, 0.0, 10.0), Vec3::new(5.0, 10.0, 10.0), Vec3::new(0.0, 5.0, 0.0), Vec3::new(10.0, 5.0, 0.0), Vec3::new(0.0, 5.0, 10.0), Vec3::new(10.0, 5.0, 10.0), Vec3::new(0.0, 0.0, 5.0), Vec3::new(10.0, 0.0, 5.0), Vec3::new(0.0, 10.0, 5.0), Vec3::new(10.0, 10.0, 5.0)];
+    let midpoints = [
+        Vec3::new(5.0, 0.0, 0.0),
+        Vec3::new(5.0, 10.0, 0.0),
+        Vec3::new(5.0, 0.0, 10.0),
+        Vec3::new(5.0, 10.0, 10.0),
+        Vec3::new(0.0, 5.0, 0.0),
+        Vec3::new(10.0, 5.0, 0.0),
+        Vec3::new(0.0, 5.0, 10.0),
+        Vec3::new(10.0, 5.0, 10.0),
+        Vec3::new(0.0, 0.0, 5.0),
+        Vec3::new(10.0, 0.0, 5.0),
+        Vec3::new(0.0, 10.0, 5.0),
+        Vec3::new(10.0, 10.0, 5.0),
+    ];
     assert!(midpoints.iter().all(|p| there(*p)), "every edge's midpoint is a candidate");
     let faces = [(Vec3::new(10.0, 5.0, 5.0), Vec3::X), (Vec3::new(5.0, 10.0, 5.0), Vec3::Y), (Vec3::new(5.0, 5.0, 10.0), Vec3::Z)];
     for (point, normal) in faces {

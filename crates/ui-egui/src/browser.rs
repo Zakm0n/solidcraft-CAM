@@ -2263,9 +2263,9 @@ pub fn coordinate_system_items(app: &SolveApp, id: u64) -> Vec<Item> {
         act("ui.editCoordinateSystem", "Edit Feature", "edit").with(json!({ "coordinate_system": id })),
         Item::sep(),
         // A setup works from it, so the engine refuses to delete it and the row says why.
-        cmd(app, "cam.coordinate_system.delete", "Delete").with(json!({ "coordinate_system": id })).off_because(
-            (!setup_free(app, id)).then(|| "A machining setup works from this coordinate system".to_string()),
-        ),
+        cmd(app, "cam.coordinate_system.delete", "Delete")
+            .with(json!({ "coordinate_system": id }))
+            .off_because((!setup_free(app, id)).then(|| "A machining setup works from this coordinate system".to_string())),
         act("ui.rename", "Rename", "rename").key("F2").with(json!({ "coordinate_system": id })),
         Item::sep(),
         act("ui.coordinateSystemVisibility", "Show/Hide", "eye").key("V").with(json!({ "coordinate_system": id, "show": !visible })),

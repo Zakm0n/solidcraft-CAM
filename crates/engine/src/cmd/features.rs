@@ -2428,8 +2428,7 @@ pub(crate) fn plane_name_problem(name: &str) -> Option<String> {
 }
 
 /// The forms [`plane_param`] takes, for its messages.
-pub(crate) const PLANE_FORMS: &str =
-    "XY, XZ, YZ, a construction plane name or id, a coordinate system's id (its own XY plane), or {origin, normal} (origin coordinates may be length expressions)";
+pub(crate) const PLANE_FORMS: &str = "XY, XZ, YZ, a construction plane name or id, a coordinate system's id (its own XY plane), or {origin, normal} (origin coordinates may be length expressions)";
 
 /// The XY plane of the coordinate system whose id is written as a string: its origin, and its
 /// own X and Y as the plane's axes. `None` when no coordinate system has that id.

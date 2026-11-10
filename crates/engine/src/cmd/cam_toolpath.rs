@@ -162,12 +162,14 @@ pub(crate) fn sections(s: &Session, plane: &Plane, names: &[String], cmd: &str) 
     let mut sections = Vec::with_capacity(names.len());
     for name in names {
         let found = state.bodies.iter().find(|b| b.name == *name).ok_or_else(|| bad(cmd, format!("unknown body name `{name}`")))?;
-        let section = certified_prism_section(&found.body, plane)
-            .map_err(|e| bad(cmd, format!("cannot read the exact geometry of body `{name}`: {e}")))?;
+        let section =
+            certified_prism_section(&found.body, plane).map_err(|e| bad(cmd, format!("cannot read the exact geometry of body `{name}`: {e}")))?;
         let Some(section) = section else {
             return Err(bad(
                 cmd,
-                format!("body `{name}` is not a uniform prism along the setup's Z axis: contour and pocket cut a constant cross-section (2.5D machining)"),
+                format!(
+                    "body `{name}` is not a uniform prism along the setup's Z axis: contour and pocket cut a constant cross-section (2.5D machining)"
+                ),
             ));
         };
         let loops = section.region.loops().cloned().collect();
@@ -215,10 +217,10 @@ pub(crate) fn frame(s: &Session, setup: Option<&Setup>, cmd: &str) -> Result<Fra
 /// body of the model. Mesh bodies are refused: a toolpath reads exact geometry.
 fn bodies(s: &Session, p: &Value, setup: Option<&Setup>, cmd: &str) -> Result<Vec<String>> {
     let mut wanted = string_list(cmd, p, "bodies")?;
-    if wanted.is_empty() {
-        if let Some(setup) = setup {
-            wanted.clone_from(&setup.bodies);
-        }
+    if wanted.is_empty()
+        && let Some(setup) = setup
+    {
+        wanted.clone_from(&setup.bodies);
     }
     if wanted.is_empty() {
         let state = s.world_state()?;

@@ -40,9 +40,9 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     if s.doc.cam.setups.len() >= MAX_SETUPS {
         return Err(bad(cmd, "too many setups"));
     }
-    let coordinate_system = p.get("coordinate_system").map_or(Ok(0), |v| {
-        v.as_u64().ok_or_else(|| bad(cmd, "`coordinate_system` must be a coordinate system's id in this design"))
-    })?;
+    let coordinate_system = p
+        .get("coordinate_system")
+        .map_or(Ok(0), |v| v.as_u64().ok_or_else(|| bad(cmd, "`coordinate_system` must be a coordinate system's id in this design")))?;
     if coordinate_system != 0 && !s.doc.coordinate_systems.iter().any(|c| c.id == coordinate_system) {
         return Err(bad(cmd, format!("there is no coordinate system {coordinate_system}")));
     }

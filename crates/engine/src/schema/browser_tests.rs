@@ -12,11 +12,8 @@ use crate::schema::{ParamCheck, input_schema_for, output_schema_for};
 #[test]
 fn a_saved_view_keeps_its_roll() {
     let mut s = Session::default();
-    s.execute(
-        "view.save",
-        &json!({"name": "Tilted", "camera": {"target": [1, 2, 3], "yaw": 0.3, "pitch": 0.2, "roll": 0.7, "distance": 100.0}}),
-    )
-    .unwrap();
+    s.execute("view.save", &json!({"name": "Tilted", "camera": {"target": [1, 2, 3], "yaw": 0.3, "pitch": 0.2, "roll": 0.7, "distance": 100.0}}))
+        .unwrap();
     assert_eq!(s.doc.named_views[0].roll, 0.7);
     let applied = s.execute("view.apply", &json!({"view": "Tilted"})).unwrap();
     assert_eq!(applied["camera"]["roll"], 0.7, "{applied}");

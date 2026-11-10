@@ -213,8 +213,9 @@ pub enum Zcam {
     /// A machining setup: its coordinate system, stock and bodies (`cam.setup.create`).
     Setup(DialogCamSetup),
     /// A machining origin and axes placed in the view, aligned to a face or an edge
-    /// (`cam.coordinate_system.create`).
-    CoordinateSystem(DialogCamCoordinateSystem),
+    /// (`cam.coordinate_system.create`). Boxed: its editable fields and the frame it drags are
+    /// several times the size of the other forms, which the dialog enum holds inline.
+    CoordinateSystem(Box<DialogCamCoordinateSystem>),
     /// The design's tool library: pick a tool to edit, or fill in a new one (`cam.tool.list`).
     ToolLibrary(DialogCamToolLibrary),
     /// Follow a part's outline with the side of the cutter (`cam.toolpath.contour`).
@@ -547,7 +548,9 @@ impl DialogCamCoordinateSystem {
                 self.gnomon.set_align_mode(GnomonAlignMode::SnapOrigin);
                 self.entry = None;
             }
-            GnomonActiveState::RelativeInput { handle, .. } => self.entry = Some(Box::new(RelativeEntry { handle, text: String::new(), focus: true })),
+            GnomonActiveState::RelativeInput { handle, .. } => {
+                self.entry = Some(Box::new(RelativeEntry { handle, text: String::new(), focus: true }))
+            }
             GnomonActiveState::AxisOrbit(_) => self.entry = None,
             GnomonActiveState::Idle => {
                 // A snap mode dropped by a second click on its handle leaves no alignment behind.
@@ -636,9 +639,11 @@ fn entry_box(app: &SolveApp, ui: &mut egui::Ui, f: &mut DialogCamCoordinateSyste
             ui.memory_mut(|memory| memory.request_focus(id));
         }
     }
-    let shown = Container::new(ui.ctx(), Surface::Canvas).area(area).fixed_pos(at + egui::vec2(t.space_8, t.space_8)).order(egui::Order::Foreground).show(
-        ui.ctx(),
-        |ui| {
+    let shown = Container::new(ui.ctx(), Surface::Canvas)
+        .area(area)
+        .fixed_pos(at + egui::vec2(t.space_8, t.space_8))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
             let frame = Container::popup_frame(ui.style()).inner_margin(egui::Margin::symmetric(6, 3));
             Container::show_backing(ui, frame, |ui| {
                 ui.horizontal(|ui| {
@@ -647,8 +652,7 @@ fn entry_box(app: &SolveApp, ui: &mut egui::Ui, f: &mut DialogCamCoordinateSyste
                     ui.label(RichText::new(entry.unit()).color(t.text_dim).size(t.font_caption));
                 });
             });
-        },
-    );
+        });
     // A press inside this rectangle stays with the entry (its field), as the gnomon knows.
     f.entry_rect = Some(shown.response.rect);
     // The global shortcuts run before the view, and egui drops a focused field's keyboard at the
@@ -709,12 +713,8 @@ fn coordinate_system_rows(app: &mut SolveApp, ui: &mut egui::Ui, f: &mut DialogC
         let _ = f.gnomon.set_origin(o);
     }
     let axes = [f.gnomon.x_axis().vec(), f.gnomon.y_axis().vec(), f.gnomon.z_axis().vec()];
-    let readout = ["X", "Y", "Z"]
-        .into_iter()
-        .zip(axes)
-        .map(|(name, v)| format!("{name} ({:.2}, {:.2}, {:.2})", v.x, v.y, v.z))
-        .collect::<Vec<_>>()
-        .join("   ");
+    let readout =
+        ["X", "Y", "Z"].into_iter().zip(axes).map(|(name, v)| format!("{name} ({:.2}, {:.2}, {:.2})", v.x, v.y, v.z)).collect::<Vec<_>>().join("   ");
     crate::ui_kit::status_line(ui, &readout, crate::ui_kit::StatusTone::Dim);
     enter && !entry_owns_keys
 }
@@ -1055,7 +1055,7 @@ pub fn start_workspace(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)
     match id {
         "cam.coordinate_system.create" => {
             let f = DialogCamCoordinateSystem::new(&app.session);
-            Some((Kind::Cam(Zcam::CoordinateSystem(f)), vec![SelInput::new("Alignment", FACES | EDGES | VERTICES, false)]))
+            Some((Kind::Cam(Zcam::CoordinateSystem(Box::new(f))), vec![SelInput::new("Alignment", FACES | EDGES | VERTICES, false)]))
         }
         "cam.setup.create" => Some((Kind::Cam(Zcam::Setup(DialogCamSetup::new(app))), vec![SelInput::new("Bodies", BODIES, true)])),
         "cam.tool.list" => Some((Kind::Cam(Zcam::ToolLibrary(DialogCamToolLibrary::new(app))), Vec::new())),
@@ -1179,8 +1179,7 @@ fn setup_length(s: &Session, label: &str, text: &str) -> Result<f64, String> {
     if text.is_empty() {
         return Ok(0.0);
     }
-    crate::length_input::eval(&s.doc, text, solidcraft_engine::doc::expr::Kind::Length)
-        .map_err(|e| format!("{}: {e}", crate::i18n::tr_label(label)))
+    crate::length_input::eval(&s.doc, text, solidcraft_engine::doc::expr::Kind::Length).map_err(|e| format!("{}: {e}", crate::i18n::tr_label(label)))
 }
 
 fn tool_commands(app: &SolveApp, f: &DialogCamToolLibrary) -> Result<Vec<(String, Value)>, String> {

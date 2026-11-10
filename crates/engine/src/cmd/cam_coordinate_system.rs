@@ -105,12 +105,7 @@ fn edit(s: &mut Session, p: &Value) -> Result<Value> {
         .get("coordinate_system")
         .and_then(Value::as_u64)
         .ok_or_else(|| bad(cmd, "`coordinate_system` must be a coordinate system's id in this design"))?;
-    let index = s
-        .doc
-        .coordinate_systems
-        .iter()
-        .position(|c| c.id == id)
-        .ok_or_else(|| bad(cmd, format!("there is no coordinate system {id}")))?;
+    let index = s.doc.coordinate_systems.iter().position(|c| c.id == id).ok_or_else(|| bad(cmd, format!("there is no coordinate system {id}")))?;
     let current = s.doc.coordinate_systems[index].clone();
     let origin = point(p, "origin", cmd, current.origin)?;
     let x = unit(p, "x_axis", cmd, current.x_axis)?;
@@ -156,12 +151,7 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
         .get("coordinate_system")
         .and_then(Value::as_u64)
         .ok_or_else(|| bad(cmd, "`coordinate_system` must be a coordinate system's id in this design"))?;
-    let index = s
-        .doc
-        .coordinate_systems
-        .iter()
-        .position(|c| c.id == id)
-        .ok_or_else(|| bad(cmd, format!("there is no coordinate system {id}")))?;
+    let index = s.doc.coordinate_systems.iter().position(|c| c.id == id).ok_or_else(|| bad(cmd, format!("there is no coordinate system {id}")))?;
     if let Some(setup) = s.doc.cam.setups.iter().find(|setup| setup.coordinate_system == id) {
         return Err(bad(cmd, format!("the setup `{}` works from this coordinate system", setup.name)));
     }

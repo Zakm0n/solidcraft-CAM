@@ -4942,7 +4942,13 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     let dragging_layer = drag_layer::holds_pointer(app, layered, manipulator_dragging);
     let hits = hover
         .filter(|_| {
-            inside && app.viewport.boxsel.is_none() && !crate::joint_drag::active(app) && !joint_handle_pointer && !gnomon_pointer && !navigating && !dragging_layer
+            inside
+                && app.viewport.boxsel.is_none()
+                && !crate::joint_drag::active(app)
+                && !joint_handle_pointer
+                && !gnomon_pointer
+                && !navigating
+                && !dragging_layer
         })
         .map(|p| pick_cached(app, &proj, p))
         .unwrap_or_default();

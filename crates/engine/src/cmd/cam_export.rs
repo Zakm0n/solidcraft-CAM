@@ -60,10 +60,10 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
         None | Some(Value::Null) => None,
         Some(v) => Some(v.as_u64().ok_or_else(|| bad(CMD, "`setup` must be a setup's id"))?),
     };
-    if let Some(id) = setup_filter.filter(|id| *id != 0) {
-        if s.doc.cam.setup(id).is_none() {
-            return Err(bad(CMD, format!("there is no setup {id}")));
-        }
+    if let Some(id) = setup_filter.filter(|id| *id != 0)
+        && s.doc.cam.setup(id).is_none()
+    {
+        return Err(bad(CMD, format!("there is no setup {id}")));
     }
     let program = program_name(s, p)?;
     let safe_height = match p.get("safe_height") {
@@ -75,9 +75,7 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let path = match p.get("path") {
         None | Some(Value::Null) => None,
-        Some(_) => {
-            Some(str_(p, "path").filter(|v| !v.trim().is_empty() && v.len() < 4096).ok_or_else(|| bad(CMD, "invalid path"))?.to_string())
-        }
+        Some(_) => Some(str_(p, "path").filter(|v| !v.trim().is_empty() && v.len() < 4096).ok_or_else(|| bad(CMD, "invalid path"))?.to_string()),
     };
     if let Some(path) = &path {
         solidcraft_io::vfs::check(path).map_err(|e| crate::EngineError::Other(e.to_string()))?;
@@ -94,16 +92,7 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
     let bytes = text.len();
     let lines = text.lines().count();
     let passes = operations.iter().map(|op| op.passes).sum();
-    let mut result = GcodeExport {
-        program,
-        units: "mm",
-        operations,
-        passes,
-        lines,
-        bytes,
-        path: None,
-        gcode: None,
-    };
+    let mut result = GcodeExport { program, units: "mm", operations, passes, lines, bytes, path: None, gcode: None };
     if let Some(path) = path {
         solidcraft_io::vfs::write(&path, text.as_bytes()).map_err(|e| crate::EngineError::Other(format!("{path}: {e}")))?;
         result.path = Some(path);
@@ -159,10 +148,7 @@ fn program_name(s: &Session, p: &Value) -> Result<String> {
         None | Some(Value::Null) => s.doc.name.clone(),
         Some(_) => str_(p, "program").ok_or_else(|| bad(CMD, "`program` must be text"))?.to_string(),
     };
-    let name: String = raw
-        .chars()
-        .map(|c| if c.is_control() || matches!(c, '(' | ')' | '%') { ' ' } else { c })
-        .collect();
+    let name: String = raw.chars().map(|c| if c.is_control() || matches!(c, '(' | ')' | '%') { ' ' } else { c }).collect();
     let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
     let name = name.trim();
     if name.chars().count() > 128 {
@@ -174,7 +160,11 @@ fn program_name(s: &Session, p: &Value) -> Result<String> {
 /// One toolpath as the program runs it: its passes, its tool's changes and its cutting moves.
 fn operation(s: &Session, toolpath: &Toolpath, safe_height: f64, program: &mut Program) -> Result<GcodeOperation> {
     let setup = setup_of(s, toolpath)?;
-    let tool = s.doc.cam.tool(toolpath.tool).ok_or_else(|| bad(CMD, format!("toolpath `{}` uses tool {}, which does not exist", toolpath.name, toolpath.tool)))?;
+    let tool = s
+        .doc
+        .cam
+        .tool(toolpath.tool)
+        .ok_or_else(|| bad(CMD, format!("toolpath `{}` uses tool {}, which does not exist", toolpath.name, toolpath.tool)))?;
     if toolpath.bodies.is_empty() {
         return Err(bad(CMD, format!("toolpath `{}` has no bodies to cut", toolpath.name)));
     }
@@ -214,7 +204,14 @@ fn operation(s: &Session, toolpath: &Toolpath, safe_height: f64, program: &mut P
     };
     program.line("M5".to_string());
     program.line(format!("G0 Z{}", number(safe)));
-    Ok(GcodeOperation { toolpath: toolpath.id, name: toolpath.name.clone(), kind: ToolpathKindParam::from_doc(toolpath.kind), tool: tool.id, passes: pass_count, moves })
+    Ok(GcodeOperation {
+        toolpath: toolpath.id,
+        name: toolpath.name.clone(),
+        kind: ToolpathKindParam::from_doc(toolpath.kind),
+        tool: tool.id,
+        passes: pass_count,
+        moves,
+    })
 }
 
 /// The setup a toolpath runs in; `None` is the model origin and the model's own axes.
@@ -222,12 +219,25 @@ fn setup_of(s: &Session, toolpath: &Toolpath) -> Result<Option<Setup>> {
     if toolpath.setup == 0 {
         return Ok(None);
     }
-    s.doc.cam.setup(toolpath.setup).cloned().map(Some).ok_or_else(|| bad(CMD, format!("toolpath `{}` uses setup {}, which does not exist", toolpath.name, toolpath.setup)))
+    s.doc
+        .cam
+        .setup(toolpath.setup)
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| bad(CMD, format!("toolpath `{}` uses setup {}, which does not exist", toolpath.name, toolpath.setup)))
 }
 
 /// Follow each outline with the cutter's side, offset out of the material by the tool's radius
 /// (and any stock left for finishing). Openings are cut from inside.
-fn contour(toolpath: &Toolpath, sections: &[super::cam_toolpath::Section], levels: &[f64], inset: f64, safe: f64, plunge: f64, program: &mut Program) -> Result<usize> {
+fn contour(
+    toolpath: &Toolpath,
+    sections: &[super::cam_toolpath::Section],
+    levels: &[f64],
+    inset: f64,
+    safe: f64,
+    plunge: f64,
+    program: &mut Program,
+) -> Result<usize> {
     let mut moves = 0;
     for &level in levels {
         for section in sections {
@@ -257,7 +267,15 @@ fn contour(toolpath: &Toolpath, sections: &[super::cam_toolpath::Section], level
 
 /// Clear the inside of each outline with a zig-zag raster one stepover wide, keeping the
 /// cutter clear of the openings and the walls.
-fn pocket(toolpath: &Toolpath, sections: &[super::cam_toolpath::Section], levels: &[f64], inset: f64, safe: f64, plunge: f64, program: &mut Program) -> Result<usize> {
+fn pocket(
+    toolpath: &Toolpath,
+    sections: &[super::cam_toolpath::Section],
+    levels: &[f64],
+    inset: f64,
+    safe: f64,
+    plunge: f64,
+    program: &mut Program,
+) -> Result<usize> {
     let mut outer = Vec::new();
     let mut holes = Vec::new();
     for section in sections {
@@ -318,7 +336,15 @@ fn pocket(toolpath: &Toolpath, sections: &[super::cam_toolpath::Section], levels
 }
 
 /// Flatten the top of the stock: passes across the whole outline, as a pocket without walls.
-fn facing(toolpath: &Toolpath, sections: &[super::cam_toolpath::Section], levels: &[f64], inset: f64, safe: f64, plunge: f64, program: &mut Program) -> Result<usize> {
+fn facing(
+    toolpath: &Toolpath,
+    sections: &[super::cam_toolpath::Section],
+    levels: &[f64],
+    inset: f64,
+    safe: f64,
+    plunge: f64,
+    program: &mut Program,
+) -> Result<usize> {
     pocket(toolpath, sections, levels, inset, safe, plunge, program)
 }
 
@@ -338,7 +364,7 @@ fn intervals(loops: &[Vec<[f64; 2]>], y: f64) -> Vec<(f64, f64)> {
     }
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
     xs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-    xs.chunks_exact(2).map(|pair| (pair[0], pair[1])).filter(|(a, b)| b > a).collect()
+    xs.as_chunks::<2>().0.iter().map(|pair| (pair[0], pair[1])).filter(|(a, b)| b > a).collect()
 }
 
 /// Every span widened by `margin` on both sides: the cutter's radius around an opening.

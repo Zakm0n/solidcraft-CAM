@@ -1642,7 +1642,11 @@ mod tests {
         let lists = crate::toolbar_custom::panel_lists("TOOLPATH");
         assert_eq!(lists.iter().map(|(panel, ..)| *panel).collect::<Vec<_>>(), ["CREATE", "2D MILLING", "3D MILLING", "OUTPUT"]);
         let create: Vec<_> = lists[0].1.iter().map(|c| c.id).collect();
-        assert_eq!(create, ["cam.coordinate_system.create", "cam.setup.create", "cam.tool.list"], "the Toolpath tab offers the origin, the setup and the tool library");
+        assert_eq!(
+            create,
+            ["cam.coordinate_system.create", "cam.setup.create", "cam.tool.list"],
+            "the Toolpath tab offers the origin, the setup and the tool library"
+        );
         let milling: Vec<_> = lists[1].1.iter().map(|c| c.id).collect();
         assert_eq!(milling, ["cam.toolpath.contour", "cam.toolpath.pocket"], "2D Milling offers the contour and pocket operations");
         assert!(lists[2].1.is_empty(), "3D Milling stays a stub");

@@ -419,13 +419,7 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
             crate::icons::glyphs::brand_mark(ui.painter(), c);
         }
         if !compact_actions {
-            ui.painter().text(
-                pos2(left + 36.0, r.center().y),
-                Align2::LEFT_CENTER,
-                "Z-CAM",
-                crate::fonts::semibold(t.font_heading),
-                t.app_bar_text,
-            );
+            ui.painter().text(pos2(left + 36.0, r.center().y), Align2::LEFT_CENTER, "Z-CAM", crate::fonts::semibold(t.font_heading), t.app_bar_text);
         }
         let mut x = left + if compact_actions { 56.0 } else { 128.0 };
         let home = Rect::from_center_size(pos2(x - 4.0, r.center().y), vec2(32.0, 32.0));
@@ -1719,21 +1713,20 @@ fn ribbon_contents(app: &mut SolveApp, ui: &mut egui::Ui, shape: RibbonShape) ->
             ribbon_galley(ui, pos2(ws.center().x - 6.0, ws.center().y + 1.0), galley, t.text);
             dropdown_arrow(&painter, pos2(ws.center().x - 6.0 + label_width / 2.0 + 7.0, ws.center().y + 1.5), t.text_dim);
         } else {
-            let workspace_icon = if render { "ws_render" } else if cam { "cam" } else { "ws_design" };
+            let workspace_icon = if render {
+                "ws_render"
+            } else if cam {
+                "cam"
+            } else {
+                "ws_design"
+            };
             icons::paint_icon(
                 &painter,
                 Rect::from_center_size(pos2(ws.center().x, ws.top() + if labels { 39.0 } else { 25.0 }), vec2(30.0, 30.0)),
                 workspace_icon,
                 1.0,
             );
-            ribbon_text(
-                ui,
-                pos2(ws.center().x, ws.top() + if labels { 69.0 } else { 50.0 }),
-                workspace_name,
-                t.font_button,
-                t.text,
-                true,
-            );
+            ribbon_text(ui, pos2(ws.center().x, ws.top() + if labels { 69.0 } else { 50.0 }), workspace_name, t.font_button, t.text, true);
             let label = app.tr("ui.ribbon_workspace");
             // Long translations share the switcher's width with the arrow and its gap.
             let galley = egui::WidgetText::from(egui::RichText::new(label).size(t.font_small).color(t.text_dim)).into_galley(

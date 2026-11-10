@@ -10,10 +10,10 @@
 use egui::{Rect, Sense, pos2, vec2};
 use solidcraft_engine::doc::cam::{Toolpath, ToolpathKind};
 
+use crate::SolveApp;
 use crate::context_menu::{Item, Target};
 use crate::theme::Tokens;
 use crate::ui_kit::{Container, DockEdges, Surface};
-use crate::SolveApp;
 
 /// The card's inner margin, matching the Browser card's inset.
 const CARD_INSET: f32 = 4.0;
@@ -32,18 +32,15 @@ pub(crate) fn toolpaths_panel(app: &mut SolveApp, ui: &mut egui::Ui, bounds: Rec
     let container = Container::new(ui.ctx(), Surface::Panel).joined(DockEdges { left: true, bottom: true, ..Default::default() });
     let frame = container.frame(ui.ctx(), t.panel, crate::frame::Side::Left).inner_margin(CARD_INSET as i8);
     let inner = (bounds.size() - frame.total_margin().sum()).max(egui::Vec2::ZERO);
-    let card = Container::new(ui.ctx(), Surface::Panel).area(egui::Id::unique("sc_cam_toolpaths_card")).fixed_pos(bounds.min).show(
-        ui.ctx(),
-        |ui| {
-            container.show_frame(ui, frame, bounds, |ui| {
-                ui.set_min_size(inner);
-                ui.set_max_size(inner);
-                ui.set_clip_rect(ui.clip_rect().intersect(Rect::from_min_size(ui.max_rect().min, inner)));
-                header(ui);
-                body(app, ui);
-            })
-        },
-    );
+    let card = Container::new(ui.ctx(), Surface::Panel).area(egui::Id::unique("sc_cam_toolpaths_card")).fixed_pos(bounds.min).show(ui.ctx(), |ui| {
+        container.show_frame(ui, frame, bounds, |ui| {
+            ui.set_min_size(inner);
+            ui.set_max_size(inner);
+            ui.set_clip_rect(ui.clip_rect().intersect(Rect::from_min_size(ui.max_rect().min, inner)));
+            header(ui);
+            body(app, ui);
+        })
+    });
     let rect = card.response.rect;
     crate::scenario::publish_rect("cam:toolpaths:card", rect);
     Some(rect)
@@ -70,29 +67,25 @@ fn body(app: &mut SolveApp, ui: &mut egui::Ui) {
         empty_state(ui);
         return;
     }
-    egui::ScrollArea::vertical()
-        .id_salt("sc_cam_toolpaths_body")
-        .min_scrolled_height(0.0)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.add_space(t.space_4);
-            for setup in &cam.setups {
-                let target = format!("cam:toolpaths:setup:{}", setup.id);
-                group_row(ui, &setup.name, cam.toolpaths_in(setup.id).count(), &target);
-                for toolpath in cam.toolpaths_in(setup.id) {
-                    toolpath_row(app, ui, toolpath);
-                }
+    egui::ScrollArea::vertical().id_salt("sc_cam_toolpaths_body").min_scrolled_height(0.0).auto_shrink([false, false]).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.add_space(t.space_4);
+        for setup in &cam.setups {
+            let target = format!("cam:toolpaths:setup:{}", setup.id);
+            group_row(ui, &setup.name, cam.toolpaths_in(setup.id).count(), &target);
+            for toolpath in cam.toolpaths_in(setup.id) {
+                toolpath_row(app, ui, toolpath);
             }
-            let unassigned: Vec<&Toolpath> = cam.toolpaths.iter().filter(|p| cam.setup(p.setup).is_none()).collect();
-            if !unassigned.is_empty() {
-                group_row(ui, crate::i18n::tr_label("Model origin"), unassigned.len(), "cam:toolpaths:setup:0");
-                for toolpath in unassigned {
-                    toolpath_row(app, ui, toolpath);
-                }
+        }
+        let unassigned: Vec<&Toolpath> = cam.toolpaths.iter().filter(|p| cam.setup(p.setup).is_none()).collect();
+        if !unassigned.is_empty() {
+            group_row(ui, crate::i18n::tr_label("Model origin"), unassigned.len(), "cam:toolpaths:setup:0");
+            for toolpath in unassigned {
+                toolpath_row(app, ui, toolpath);
             }
-            ui.add_space(t.space_4);
-        });
+        }
+        ui.add_space(t.space_4);
+    });
 }
 
 /// A setup's own row: its name in the Browser's group style, and how many toolpaths it holds.
@@ -158,12 +151,8 @@ pub fn toolpath_items(app: &SolveApp, id: u64) -> Vec<Item> {
 /// so a later list slots in without moving the header.
 fn empty_state(ui: &mut egui::Ui) {
     let t = Tokens::get();
-    egui::ScrollArea::vertical()
-        .id_salt("sc_cam_toolpaths_body")
-        .min_scrolled_height(0.0)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.add_space(t.space_4);
-            ui.label(egui::RichText::new(crate::i18n::tr("ui.cam.toolpaths.empty")).color(t.text_dim).size(t.font_body));
-        });
+    egui::ScrollArea::vertical().id_salt("sc_cam_toolpaths_body").min_scrolled_height(0.0).auto_shrink([false, false]).show(ui, |ui| {
+        ui.add_space(t.space_4);
+        ui.label(egui::RichText::new(crate::i18n::tr("ui.cam.toolpaths.empty")).color(t.text_dim).size(t.font_body));
+    });
 }

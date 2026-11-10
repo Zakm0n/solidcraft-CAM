@@ -2384,10 +2384,7 @@ fn a_coordinate_system_a_setup_works_from_cannot_be_deleted() {
 fn a_coordinate_systems_named_view_squares_its_axes_on_screen() {
     let mut s = Session::default();
     let id = s
-        .execute(
-            "cam.coordinate_system.create",
-            &json!({"origin": [10, 20, 30], "x_axis": [0, 0, 1], "z_axis": [1, 1, 0], "name": "Stock"}),
-        )
+        .execute("cam.coordinate_system.create", &json!({"origin": [10, 20, 30], "x_axis": [0, 0, 1], "z_axis": [1, 1, 0], "name": "Stock"}))
         .unwrap()["coordinate_system"]
         .as_u64()
         .unwrap();
@@ -2420,10 +2417,7 @@ fn a_coordinate_system_sketches_on_its_frame_and_converts_to_a_plane() {
     let mut h = crate::scenario::Harness::new();
     let id = h
         .app
-        .run(
-            "cam.coordinate_system.create",
-            json!({"origin": [10, 20, 30], "x_axis": [0, 1, 0], "z_axis": [1, 0, 0], "name": "Stock"}),
-        )
+        .run("cam.coordinate_system.create", json!({"origin": [10, 20, 30], "x_axis": [0, 1, 0], "z_axis": [1, 0, 0], "name": "Stock"}))
         .unwrap()["coordinate_system"]
         .as_u64()
         .unwrap();

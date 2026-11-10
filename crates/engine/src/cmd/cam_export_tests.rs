@@ -116,14 +116,10 @@ fn the_call_exports_the_toolpaths_it_names() {
     plate(&mut s);
     let tool = mill(&mut s);
     let first = contour(&mut s, tool);
-    let second = s
-        .execute(
-            "cam.toolpath.pocket",
-            &json!({"tool": tool, "total_depth": 10, "stepover": 4, "feed_rate": 500}),
-        )
-        .unwrap()["toolpath"]["id"]
-        .as_u64()
-        .unwrap();
+    let second =
+        s.execute("cam.toolpath.pocket", &json!({"tool": tool, "total_depth": 10, "stepover": 4, "feed_rate": 500})).unwrap()["toolpath"]["id"]
+            .as_u64()
+            .unwrap();
     let one = s.execute("cam.export.gcode", &json!({"toolpaths": [first]})).unwrap();
     assert_eq!(one["operations"].as_array().unwrap().len(), 1);
     assert_eq!(one["operations"][0]["toolpath"], first);
@@ -131,14 +127,10 @@ fn the_call_exports_the_toolpaths_it_names() {
     assert_eq!(all["operations"].as_array().unwrap().len(), 2);
     assert_eq!(all["operations"][1]["toolpath"], second);
     let setup = s.execute("cam.setup.create", &json!({"name": "Mill", "bodies": ["Plate"]})).unwrap()["setup"].as_u64().unwrap();
-    let in_setup = s
-        .execute(
-            "cam.toolpath.contour",
-            &json!({"tool": tool, "setup": setup, "total_depth": 10, "feed_rate": 400}),
-        )
-        .unwrap()["toolpath"]["id"]
-        .as_u64()
-        .unwrap();
+    let in_setup =
+        s.execute("cam.toolpath.contour", &json!({"tool": tool, "setup": setup, "total_depth": 10, "feed_rate": 400})).unwrap()["toolpath"]["id"]
+            .as_u64()
+            .unwrap();
     let only_setup = s.execute("cam.export.gcode", &json!({"setup": setup})).unwrap();
     assert_eq!(only_setup["operations"].as_array().unwrap().len(), 1);
     assert_eq!(only_setup["operations"][0]["toolpath"], in_setup);
