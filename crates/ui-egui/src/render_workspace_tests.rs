@@ -8812,6 +8812,10 @@ fn live_image_imported_mesh_keeps_selected_and_hovered_face_and_body_feedback() 
     let host = CpuHost::for_platform().unwrap();
     h.app.session.set_render_job_host(Some(host.clone())).unwrap();
     h.app.render_workspace.image_host = Some(host);
+    if image_host(&h.app, ImageMethod::CpuRaytrace).is_err() {
+        eprintln!("native CPU live feedback test requires raytrace-cpu");
+        return;
+    }
     enter(&mut h.app, true).unwrap();
     h.app.render_workspace.view.raytrace.progressive = Some(CpuProgressiveOptions { samples_per_pixel: 3, seed: 81 });
     h.app.viewport.rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(256., 256.)));
@@ -12203,7 +12207,8 @@ fn cpu_atmosphere_pointer_fields_preserve_saved_camera_and_roundtrip_with_one_un
     assert_eq!(h.app.session.undo.len(), history.1 + 2, "one command for the finished numeric gesture");
     assert_eq!(h.app.cam, camera);
     assert!(h.app.render_workspace.view.dirty);
-    let request = image_params(&h.app).unwrap();
+    // Pure request construction: the UI edit must reach the request without a CPU raytrace build.
+    let request = image_request(&h.app).unwrap();
     assert_eq!(request["settings"]["job"]["options"]["volume"]["extinction_per_mm"], 0.0025);
     h.app.run("edit.undo", json!({})).unwrap();
     setups::sync_revision(&mut h.app);
