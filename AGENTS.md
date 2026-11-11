@@ -23,10 +23,8 @@ Work: ROADMAP.md, "Where help is wanted most" in CONTRIBUTING.md, issues labelle
 - New UI strings go in `assets/locales/pending/<slug>.json`, ATTRIBUTION rows in `attribution/pending/<slug>.md`: `cargo xtask lists`.
 - A changed default keeps the old behaviour behind a preference and fills the PR's `Changes a default:` line: `pr-checks.yml`.
 - A regression test goes in the area's existing test file, never a per-bug file (#3226).
-- Look at open PRs first, claim with a draft PR (lowest number wins), one topic per PR: `skills/solidcraft-contributing/SKILL.md`.
-- A PR's title and first sentence make sense to someone who never saw your chat or the issue: `skills/solidcraft-contributing/SKILL.md`.
-- Code, comments, commit messages and docs are in English, always: `skills/solidcraft-contributing/SKILL.md` ("Working as an agent").
-- Independent work runs in parallel, dependent work stays sequential: `skills/solidcraft-contributing/SKILL.md` ("Working as an agent").
+- Look at open PRs first, claim with a draft PR (lowest number wins), one topic per PR, a title and first sentence that stand alone: `skills/solidcraft-contributing/SKILL.md`.
+- Code, comments, commits and docs are in English, always; independent work runs in parallel, dependent work stays sequential: `skills/solidcraft-contributing/SKILL.md` ("Working as an agent").
 - Show observable changes with real screenshots or a recording, captured yourself.
 - Run `cargo xtask ci` before every commit. `cargo xtask skills` keeps this file and `skills/` honest.
 
@@ -38,6 +36,7 @@ Work: ROADMAP.md, "Where help is wanted most" in CONTRIBUTING.md, issues labelle
 | Non-test Rust, hostile input, a crash report | `skills/solidcraft-crash-safety/SKILL.md` |
 | A command, a crate boundary | `skills/solidcraft-commands/SKILL.md` |
 | A dialog, panel, camera, icon, colour | `skills/solidcraft-ui/SKILL.md` |
+| Z-CAM CAM features, data, toolpaths or dialogs | `skills/zcam-expansion/SKILL.md` |
 | Labels, messages, translations | `skills/solidcraft-ui-text/SKILL.md` |
 | Saving something new in a design, import, export | `skills/solidcraft-file-formats/SKILL.md` |
 | Preferences, a changed default | `skills/solidcraft-preferences/SKILL.md` |
@@ -50,8 +49,3 @@ Work: ROADMAP.md, "Where help is wanted most" in CONTRIBUTING.md, issues labelle
 | A bug report, a crash, a wrong result | `skills/solidcraft-reporting/SKILL.md` |
 | Checking, porting, designs in git | `skills/solidcraft-checking/SKILL.md` |
 | Assemblies, joints, motion | `skills/solidcraft-mechanisms/SKILL.md` |
-
-## Z-CAM Expansion Rules (Mandatory)
-1. **Modify SolidCraft In-Place:** Never create a standalone mock binary (`apps/cam-workspace`). All Z-CAM UI modifications happen directly inside `crates/ui-egui`, `apps/solidcraft`, and `apps/solidcraft-web` so the production `wgpu` 3D viewport, camera, and B-Rep kernel remain 100% active.
-2. **Follow `./skills/*/SKILL.md`:** Before modifying UI, commands, or viewport state, read the relevant skill files (`skills/solidcraft-ground-rules/SKILL.md`, `skills/solidcraft-ui/SKILL.md`, `skills/solidcraft-ui-text/SKILL.md`, `skills/solidcraft-commands/SKILL.md`, `skills/solidcraft-performance/SKILL.md`, and `skills/solidcraft-checking/SKILL.md`).
-3. **Clean-Room Implementation:** Implement all CAM data structures (`crates/cam`), toolpath algorithms, and UI dialogs strictly from the Product Owner's plain-English functional specifications.

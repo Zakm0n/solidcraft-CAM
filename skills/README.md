@@ -12,6 +12,7 @@ The contributor skills (everything except modeling, editing, checking and mechan
 |---|---|
 | [`solidcraft-contributing`](solidcraft-contributing/SKILL.md) | helps someone set up a fork, choose and claim an issue, and submit a contribution for review; the rules every PR follows |
 | [`solidcraft-ground-rules`](solidcraft-ground-rules/SKILL.md) | adds a dependency, asset or wording: independence, licences, attribution, the product name |
+| [`zcam-expansion`](zcam-expansion/SKILL.md) | works on Z-CAM: where CAM features go, which skills to read first, and the clean-room rule for CAM data, toolpaths and dialogs |
 | [`solidcraft-crash-safety`](solidcraft-crash-safety/SKILL.md) | writes non-test Rust, handles hostile input or investigates a crash report |
 | [`solidcraft-commands`](solidcraft-commands/SKILL.md) | adds a command or decides which crate code belongs in |
 | [`solidcraft-ui`](solidcraft-ui/SKILL.md) | adds a dialog, panel, camera input, icon or colour |

@@ -28,6 +28,7 @@ mod cam_setup;
 mod cam_tool;
 mod cam_toolpath;
 mod cam_toolpath_contour;
+mod cam_toolpath_drill;
 mod cam_toolpath_pocket;
 pub(crate) mod clearance;
 mod clipboard;
@@ -349,6 +350,7 @@ pub fn command_specs() -> Vec<&'static CommandSpec> {
     v.extend(cam_tool::COMMANDS.iter());
     v.extend(cam_toolpath::COMMANDS.iter());
     v.extend(cam_toolpath_contour::COMMANDS.iter());
+    v.extend(cam_toolpath_drill::COMMANDS.iter());
     v.extend(cam_toolpath_pocket::COMMANDS.iter());
     v.extend(sheet::COMMANDS.iter());
     v.extend(plastic::COMMANDS.iter());
