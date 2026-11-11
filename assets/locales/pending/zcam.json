@@ -21,6 +21,7 @@
     "cmd.cam.toolpath.contour": "Contour",
     "cmd.cam.toolpath.contour2d": "2D Contour",
     "cmd.cam.toolpath.pocket": "Pocket",
+    "cmd.cam.toolpath.pocket_2d": "2D Pocket",
     "help.cam.coordinate_system.create": "Creates a programmable machining origin and XYZ orientation.\n\nUse this to define where the machine zero is located on the stock.",
     "help.cam.export.gcode": "Writes the design's toolpaths as an ISO G-code program in millimetres.\n\nUse this when a machine or a simulator needs the program: contour follows each outline with the cutter's side, pocket clears the inside with a zig-zag raster, and a toolpath without a feed rate is refused.",
     "ui.cam.toolpaths.empty": "No toolpaths yet",
@@ -46,7 +47,12 @@
     "help.cam.tool.list": "Lists the design's tool library: every cutter's kind, diameter and cutting edges.\n\nUse this to check which tools are available before creating or editing one.",
     "help.cam.toolpath.contour": "Cuts around the machined bodies' outlines with the tool's side, leaving the stated stock.\n\nUse this to finish a wall or to cut the part free of its stock.",
     "help.cam.toolpath.contour2d": "Generates a 2.5D profile toolpath offsetting selected edges by the tool radius.\n\nUse this to follow a wall, a slot or an opening the part's outline does not bound.",
-    "help.cam.toolpath.pocket": "Clears the area inside the machined bodies' outlines with a zig-zag raster at the stated stepover.\n\nUse this to remove the material inside an outline before a finishing pass."
+    "help.cam.toolpath.pocket": "Clears the area inside the machined bodies' outlines with a zig-zag raster at the stated stepover.\n\nUse this to remove the material inside an outline before a finishing pass.",
+    "help.cam.toolpath.pocket_2d": "Clears a closed boundary using offset passes. Use this to machine pockets or large flat areas.",
+    "dialog.cam.pocket.stepover": "Stepover",
+    "dialog.cam.pocket.depth": "Total Depth",
+    "Clearance height": "Clearance height",
+    "Bottom depth": "Bottom depth"
   },
   "ar": {
     "ui.workspace.cam": "CAM",
@@ -93,7 +99,15 @@
     "help.cam.setup.create": "ينشئ إعداد تشغيل آلي: نظام الإحداثيات والقطعة الخام والأجسام التي يشغّلها.\n\nاستخدمه عندما تُقطع عدة مسارات أدوات في تثبيت واحد للقطعة الخام.",
     "help.cam.tool.list": "يسرد مكتبة أدوات التصميم: نوع كل قاطع وقطره وعدد حوافه القاطعة.\n\nاستخدمه للتحقق من الأدوات المتاحة قبل إنشاء أداة أو تحريرها.",
     "help.cam.toolpath.contour": "يقطع حول مخططات الأجسام المشغّلة بجانب الأداة، ويترك المادة المذكورة.\n\nاستخدمه لإنهاء جدار أو لفصل القطعة عن مادتها الخام.",
-    "help.cam.toolpath.pocket": "يفرّغ المنطقة داخل مخططات الأجسام المشغّلة بمسح متعرج عند الخطوة الجانبية المذكورة.\n\nاستخدمه لإزالة المادة داخل مخطط قبل تمريرة التشطيب."
+    "help.cam.toolpath.pocket": "يفرّغ المنطقة داخل مخططات الأجسام المشغّلة بمسح متعرج عند الخطوة الجانبية المذكورة.\n\nاستخدمه لإزالة المادة داخل مخطط قبل تمريرة التشطيب.",
+    "cmd.cam.toolpath.contour2d": "كفاف ثنائي الأبعاد",
+    "help.cam.toolpath.contour2d": "ينشئ مسار أداة كفافي 2.5D يزيح الحواف المحددة بمقدار نصف قطر الأداة.\n\nاستخدمه لمتابعة جدار أو فتحة أو تجويف لا يحيط به مخطط القطعة.",
+    "cmd.cam.toolpath.pocket_2d": "جيب ثنائي الأبعاد",
+    "help.cam.toolpath.pocket_2d": "يفرّغ حدًا مغلقًا باستخدام تمريرات متداخلة. استخدمه لتشغيل الجيوب أو المساحات المسطحة الكبيرة.",
+    "dialog.cam.pocket.stepover": "الخطوة الجانبية",
+    "dialog.cam.pocket.depth": "العمق الكلي",
+    "Clearance height": "ارتفاع الأمان",
+    "Bottom depth": "عمق القاع"
   },
   "de": {
     "ui.workspace.cam": "CAM",
@@ -111,7 +125,15 @@
     "cmd.cam.toolpath.contour": "Kontur",
     "cmd.cam.toolpath.pocket": "Tasche",
     "help.cam.coordinate_system.create": "Erstellt einen programmierbaren Bearbeitungsursprung und eine XYZ-Ausrichtung.\n\nDamit legen Sie fest, wo der Maschinennullpunkt auf dem Rohteil liegt.",
-    "ui.cam.toolpaths.empty": "Noch keine Werkzeugwege"
+    "ui.cam.toolpaths.empty": "Noch keine Werkzeugwege",
+    "cmd.cam.toolpath.contour2d": "2D-Kontur",
+    "help.cam.toolpath.contour2d": "Erzeugt einen 2.5D-Profilwerkzeugweg, der die ausgewählten Kanten um den Werkzeugradius versetzt.\n\nDamit folgen Sie einer Wand, einem Schlitz oder einer Öffnung, die von der Kontur des Teils nicht begrenzt werden.",
+    "cmd.cam.toolpath.pocket_2d": "2D-Tasche",
+    "help.cam.toolpath.pocket_2d": "Räumt eine geschlossene Begrenzung mit versetzten Durchgängen. Damit bearbeiten Sie Taschen oder große ebene Flächen.",
+    "dialog.cam.pocket.stepover": "Schrittweite",
+    "dialog.cam.pocket.depth": "Gesamttiefe",
+    "Clearance height": "Sicherheitshöhe",
+    "Bottom depth": "Bodentiefe"
   },
   "he": {
     "ui.workspace.cam": "CAM",
@@ -158,7 +180,15 @@
     "help.cam.setup.create": "יוצר הגדרת עיבוד: מערכת הקואורדינטות, חומר הגלם והגופים שהיא מעבדת.\n\nהשתמשו בו כאשר כמה נתיבי כלים נחתכים בתפיסה אחת של חומר הגלם.",
     "help.cam.tool.list": "מציג את ספריית הכלים של העיצוב: הסוג, הקוטר והלהבים של כל חרט.\n\nהשתמשו בו כדי לבדוק אילו כלים זמינים לפני יצירת כלי או עריכתו.",
     "help.cam.toolpath.contour": "חותך סביב קווי המתאר של הגופים המעובדים בצד הכלי, ומותיר את החומר הנקוב.\n\nהשתמשו בו כדי לגמור דופן או לשחרר את החלק מחומר הגלם.",
-    "help.cam.toolpath.pocket": "מפנה את השטח שבתוך קווי המתאר של הגופים המעובדים ברסטר זיגזג בצעד הצדי הנקוב.\n\nהשתמשו בו כדי להסיר את החומר שבתוך מתאר לפני מעבר גימור."
+    "help.cam.toolpath.pocket": "מפנה את השטח שבתוך קווי המתאר של הגופים המעובדים ברסטר זיגזג בצעד הצדי הנקוב.\n\nהשתמשו בו כדי להסיר את החומר שבתוך מתאר לפני מעבר גימור.",
+    "cmd.cam.toolpath.contour2d": "קו מתאר דו-ממדי",
+    "help.cam.toolpath.contour2d": "יוצר נתיב כלי פרופיל 2.5D המזיז את הקצוות הנבחרים ברדיוס הכלי.\n\nהשתמשו בו כדי לעקוב אחר דופן, חריץ או פתח שאינם תחומים בקו המתאר של החלק.",
+    "cmd.cam.toolpath.pocket_2d": "כיס דו-ממדי",
+    "help.cam.toolpath.pocket_2d": "מפנה תחום סגור באמצעות מעברים מוזחים. השתמשו בו לעיבוד כיסים או שטחים שטוחים גדולים.",
+    "dialog.cam.pocket.stepover": "צעד צדי",
+    "dialog.cam.pocket.depth": "עומק כולל",
+    "Clearance height": "גובה פינוי",
+    "Bottom depth": "עומק תחתון"
   },
   "ja": {
     "ui.workspace.cam": "CAM",
@@ -205,7 +235,15 @@
     "help.cam.setup.create": "座標系、素材、加工するボディをまとめた加工セットアップを作成します。\n\n同じ段取りで複数のツールパスを削るときに使います。",
     "help.cam.tool.list": "設計のツールライブラリを一覧します。各工具の種類、直径、刃数を示します。\n\n工具を作成または編集する前に、使える工具を確認するときに使います。",
     "help.cam.toolpath.contour": "加工するボディの外形に沿って工具の側面で切削し、指定した取り代を残します。\n\n壁面を仕上げるときや、部品を素材から切り離すときに使います。",
-    "help.cam.toolpath.pocket": "加工するボディの外形の内側を、指定したステップオーバーでジグザグ走査して取り除きます。\n\n仕上げ前の外形内の材料を取り除くときに使います。"
+    "help.cam.toolpath.pocket": "加工するボディの外形の内側を、指定したステップオーバーでジグザグ走査して取り除きます。\n\n仕上げ前の外形内の材料を取り除くときに使います。",
+    "cmd.cam.toolpath.contour2d": "2D 輪郭",
+    "help.cam.toolpath.contour2d": "選択したエッジを工具半径だけオフセットした 2.5D プロファイル ツールパスを生成します。\n\n部品の外形に含まれない壁、溝、開口部に沿って加工するときに使います。",
+    "cmd.cam.toolpath.pocket_2d": "2D ポケット",
+    "help.cam.toolpath.pocket_2d": "閉じた境界をオフセットパスで取り除きます。ポケットや大きな平面領域の加工に使います。",
+    "dialog.cam.pocket.stepover": "ステップオーバー",
+    "dialog.cam.pocket.depth": "総深さ",
+    "Clearance height": "クリアランス高さ",
+    "Bottom depth": "底面深さ"
   },
   "ko": {
     "ui.workspace.cam": "CAM",
@@ -223,7 +261,15 @@
     "cmd.cam.toolpath.contour": "윤곽",
     "cmd.cam.toolpath.pocket": "포켓",
     "help.cam.coordinate_system.create": "프로그래밍 가능한 가공 원점과 XYZ 방향을 만듭니다.\n\n원자재에서 기계 원점의 위치를 정의할 때 사용합니다.",
-    "ui.cam.toolpaths.empty": "아직 공구 경로가 없습니다"
+    "ui.cam.toolpaths.empty": "아직 공구 경로가 없습니다",
+    "cmd.cam.toolpath.contour2d": "2D 윤곽",
+    "help.cam.toolpath.contour2d": "선택한 모서리를 공구 반경만큼 오프셋한 2.5D 프로파일 공구 경로를 생성합니다.\n\n부품 윤곽이 둘러싸지 않는 벽, 슬롯 또는 개구부를 따라갈 때 사용합니다.",
+    "cmd.cam.toolpath.pocket_2d": "2D 포켓",
+    "help.cam.toolpath.pocket_2d": "오프셋 패스로 닫힌 경계를 제거합니다. 포켓이나 넓은 평면 영역을 가공할 때 사용합니다.",
+    "dialog.cam.pocket.stepover": "스텝오버",
+    "dialog.cam.pocket.depth": "총 깊이",
+    "Clearance height": "안전 높이",
+    "Bottom depth": "바닥 깊이"
   },
   "vi": {
     "ui.workspace.cam": "CAM",
@@ -270,7 +316,15 @@
     "help.cam.setup.create": "Tạo một thiết lập gia công: hệ tọa độ, phôi và các thân mà nó gia công.\n\nDùng khi nhiều đường chạy dao được cắt trong cùng một lần gá phôi.",
     "help.cam.tool.list": "Liệt kê thư viện dụng cụ của thiết kế: loại, đường kính và số lưỡi của từng dao.\n\nDùng để xem những dụng cụ sẵn có trước khi tạo hoặc sửa một dụng cụ.",
     "help.cam.toolpath.contour": "Cắt quanh đường viền của các thân được gia công bằng mặt bên của dao, để lại lượng dư đã nêu.\n\nDùng để hoàn thiện một thành hoặc tách chi tiết ra khỏi phôi.",
-    "help.cam.toolpath.pocket": "Dọn vùng bên trong đường viền của các thân được gia công bằng quét zíc zắc với bước ngang đã nêu.\n\nDùng để bỏ vật liệu bên trong một đường viền trước lượt hoàn thiện."
+    "help.cam.toolpath.pocket": "Dọn vùng bên trong đường viền của các thân được gia công bằng quét zíc zắc với bước ngang đã nêu.\n\nDùng để bỏ vật liệu bên trong một đường viền trước lượt hoàn thiện.",
+    "cmd.cam.toolpath.contour2d": "Đường bao 2D",
+    "help.cam.toolpath.contour2d": "Tạo đường chạy dao biên dạng 2.5D bằng cách bù các cạnh đã chọn theo bán kính dao.\n\nDùng để đi theo một thành, một rãnh hoặc một lỗ mở mà đường viền của chi tiết không bao quanh.",
+    "cmd.cam.toolpath.pocket_2d": "Khoang 2D",
+    "help.cam.toolpath.pocket_2d": "Dọn sạch một biên kín bằng các lượt bù. Dùng để gia công khoang hoặc vùng phẳng lớn.",
+    "dialog.cam.pocket.stepover": "Bước ngang",
+    "dialog.cam.pocket.depth": "Tổng chiều sâu",
+    "Clearance height": "Chiều cao an toàn",
+    "Bottom depth": "Chiều sâu đáy"
   },
   "zh": {
     "ui.workspace.cam": "CAM",
@@ -317,6 +371,14 @@
     "help.cam.setup.create": "创建加工设置：坐标系、毛坯以及它加工的实体。\n\n当多条刀轨在同一次装夹毛坯中切削时使用。",
     "help.cam.tool.list": "列出设计的刀具库：每把刀具的类型、直径和刃数。\n\n在创建或编辑刀具之前用来确认有哪些刀具可用。",
     "help.cam.toolpath.contour": "用刀具侧面沿被加工实体的轮廓切削，并留出所给的预留量。\n\n用于精加工侧壁或将零件从毛坯上切下。",
-    "help.cam.toolpath.pocket": "以所给步距用锯齿光栅清除被加工实体轮廓内部的区域。\n\n用于在精加工之前去除轮廓内的材料。"
+    "help.cam.toolpath.pocket": "以所给步距用锯齿光栅清除被加工实体轮廓内部的区域。\n\n用于在精加工之前去除轮廓内的材料。",
+    "cmd.cam.toolpath.contour2d": "2D 轮廓",
+    "help.cam.toolpath.contour2d": "通过按刀具半径偏移所选边来生成 2.5D 轮廓刀轨。\n\n用于沿零件轮廓未包围的侧壁、槽或开口走刀。",
+    "cmd.cam.toolpath.pocket_2d": "2D 型腔",
+    "help.cam.toolpath.pocket_2d": "使用偏移走刀清空封闭边界。用于加工型腔或大面积平面区域。",
+    "dialog.cam.pocket.stepover": "步距",
+    "dialog.cam.pocket.depth": "总深度",
+    "Clearance height": "安全高度",
+    "Bottom depth": "底面深度"
   }
 }

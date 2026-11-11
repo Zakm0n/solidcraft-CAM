@@ -223,6 +223,41 @@ fn the_pocket_dialog_names_the_model_origin_without_a_setup() {
     assert_eq!(cmds[0].1["stock_to_leave"], 0.2);
 }
 
+/// The Toolpath tab's 2D Pocket dialog builds `cam.toolpath.pocket_2d` from the face it picked,
+/// its setup, its tool, the stepover between its passes and its depth.
+#[test]
+fn the_pocket2d_dialog_builds_the_operation() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    app.run("solid.box", json!({"length": 40, "width": 20, "height": 10, "body_name": "Plate"})).unwrap();
+    app.run("cam.tool.create", json!({"name": "6 flat", "diameter": 6.0})).unwrap();
+    app.run("cam.setup.create", json!({"name": "Roughing"})).unwrap();
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.toolpath.pocket_2d").expect("the 2D Pocket command opens a dialog");
+    assert_eq!(d.inputs.len(), 1, "the faces it clears are the dialog's input");
+    // A point on the plate's top face.
+    d.inputs[0].items = vec![Sel::Face { body: "Plate".into(), index: 0, point: Vec3::new(20.0, 10.0, 10.0) }];
+    if let Kind::Cam(Zcam::Pocket2d(f)) = &mut d.kind {
+        // The design's only setup is chosen, and half the tool's diameter is the stepover.
+        assert_eq!((f.setup, f.tool), (1, 0));
+        assert_eq!(f.stepover, "3 mm", "half the first tool's diameter");
+        f.stepover = "3 mm".into();
+        f.depth = "5 mm".into();
+    } else {
+        panic!("cam.toolpath.pocket_2d has the wrong dialog");
+    }
+    let cmds = apply_commands(&app, &d).unwrap();
+    assert_eq!(cmds[0].0, "cam.toolpath.pocket_2d");
+    assert_eq!(cmds[0].1["tool"], app.session.doc.cam.tools[0].id);
+    assert_eq!(cmds[0].1["setup"], app.session.doc.cam.setups[0].id);
+    assert_eq!(cmds[0].1["stepover"], 3.0);
+    assert_eq!(cmds[0].1["depth"], 5.0);
+    let faces = cmds[0].1["boundary_faces"].as_array().expect("the picked faces");
+    assert_eq!(faces.len(), 1, "{faces:?}");
+    assert_eq!(faces[0].as_array().map(Vec::len), Some(3), "a pick is a point on the face: {faces:?}");
+    let reply = app.run(&cmds[0].0, cmds[0].1.clone()).unwrap();
+    assert!(reply["loops"].as_u64().unwrap_or_default() >= 1, "the top face is cleared with offset passes: {reply}");
+    assert!(app.session.doc.cam.toolpaths.is_empty(), "the 2D pocket stores nothing in the design");
+}
+
 /// A plate with one cutting value and one of its top edges, for the 2D contour tests: the app,
 /// and a pick of the edge its top face meets at y = 0.
 fn plate_with_top_edge() -> (SolveApp, Sel) {

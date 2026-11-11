@@ -225,6 +225,9 @@ pub enum Zcam {
     Contour2d(DialogCamContour2d),
     /// Clear the material inside a part's outline (`cam.toolpath.pocket`).
     Pocket(DialogCamPocket),
+    /// Clear the region of the picked faces with concentric offset passes
+    /// (`cam.toolpath.pocket_2d`).
+    Pocket2d(DialogCamPocket2d),
 }
 
 impl Zcam {
@@ -243,6 +246,7 @@ impl Zcam {
             Zcam::Contour(_) => "cam.toolpath.contour",
             Zcam::Contour2d(_) => "cam.toolpath.contour2d",
             Zcam::Pocket(_) => "cam.toolpath.pocket",
+            Zcam::Pocket2d(_) => "cam.toolpath.pocket_2d",
         }
     }
 
@@ -255,6 +259,7 @@ impl Zcam {
             Zcam::Contour(_) => "CONTOUR",
             Zcam::Contour2d(_) => "2D CONTOUR",
             Zcam::Pocket(_) => "POCKET",
+            Zcam::Pocket2d(_) => "2D POCKET",
         }
     }
 }
@@ -1095,6 +1100,65 @@ impl DialogCamContour2d {
     }
 }
 
+/// 2D Pocket: clear the region of the picked faces (`cam.toolpath.pocket_2d`).
+///
+/// The faces are picked in the view; the engine reads their exact planar loops and clears each
+/// region with concentric offset passes, one stepover apart, down to `depth`.
+#[derive(Clone, Debug)]
+pub struct DialogCamPocket2d {
+    /// Index into the setup choices: 0 is the model origin, n is `doc.cam.setups[n - 1]`.
+    pub setup: usize,
+    /// Index into the design's tools, as `cam.tool.list` reports them.
+    pub tool: usize,
+    /// How far the cutter moves over between neighbouring passes, in mm.
+    pub stepover: String,
+    /// How deep it cuts below the top of the stock, in mm.
+    pub depth: String,
+}
+
+impl DialogCamPocket2d {
+    fn new(app: &SolveApp) -> Self {
+        let doc = &app.session.doc;
+        // Half the first tool's diameter is the usual stepover; a design without tools leaves
+        // the field empty until one is created.
+        let stepover = doc.cam.tools.first().map(|t| crate::length_input::default(doc, &format!("{}", t.diameter / 2.0))).unwrap_or_default();
+        DialogCamPocket2d {
+            // A design with setups cuts in its first one; without, in the model origin.
+            setup: usize::from(!doc.cam.setups.is_empty()),
+            tool: 0,
+            stepover,
+            depth: crate::length_input::default(doc, "10"),
+        }
+    }
+}
+
+/// The 2D pocket's parameters: the tool, the picked faces, the setup it cuts in, the stepover
+/// between its passes and its depth. A picked point stands for the face it lies on; the engine
+/// finds that face's exact boundary loops.
+fn pocket2d_params(app: &SolveApp, f: &DialogCamPocket2d, inputs: &[SelInput]) -> Result<Value, String> {
+    let s = &app.session;
+    let tool = s.doc.cam.tools.get(f.tool).ok_or_else(|| "choose a tool (the design's Tool Library is empty)".to_string())?;
+    let faces: Vec<Value> =
+        inputs.first().map(|i| i.items.face_points()).unwrap_or_default().into_iter().map(crate::selection::point_value).collect();
+    if faces.is_empty() {
+        return Err("select the faces whose region the cutter clears".into());
+    }
+    let length = |label: &str, text: &str| -> Result<f64, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(format!("enter {}", crate::i18n::tr_label(label)));
+        }
+        crate::length_input::eval(&s.doc, text, solidcraft_engine::doc::expr::Kind::Length)
+            .map_err(|e| format!("{}: {e}", crate::i18n::tr_label(label)))
+    };
+    let mut p =
+        json!({ "tool": tool.id, "boundary_faces": faces, "stepover": length("Stepover", &f.stepover)?, "depth": length("Total Depth", &f.depth)? });
+    if let Some(setup) = f.setup.checked_sub(1).and_then(|i| s.doc.cam.setups.get(i)) {
+        p["setup"] = json!(setup.id);
+    }
+    Ok(p)
+}
+
 /// The 2D contour's parameters: the tool, the picked edges, the setup it cuts in and its depths.
 /// A picked point stands for the edge it lies on; the engine finds that edge's exact curve.
 fn contour2d_params(app: &SolveApp, f: &DialogCamContour2d, inputs: &[SelInput]) -> Result<Value, String> {
@@ -1191,6 +1255,7 @@ pub fn start_workspace(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)
         "cam.toolpath.contour" => Some((Kind::Cam(Zcam::Contour(DialogCamContour::new(app))), Vec::new())),
         "cam.toolpath.contour2d" => Some((Kind::Cam(Zcam::Contour2d(DialogCamContour2d::new(app))), vec![SelInput::new("Edges", EDGES, true)])),
         "cam.toolpath.pocket" => Some((Kind::Cam(Zcam::Pocket(DialogCamPocket::new(app))), Vec::new())),
+        "cam.toolpath.pocket_2d" => Some((Kind::Cam(Zcam::Pocket2d(DialogCamPocket2d::new(app))), vec![SelInput::new("Faces", FACES, true)])),
         _ => None,
     }
 }
@@ -1204,6 +1269,7 @@ pub fn zcam_rows(app: &mut SolveApp, ui: &mut egui::Ui, form: &mut Zcam) -> bool
         Zcam::Contour(f) => toolpath_rows(app, ui, &mut f.form),
         Zcam::Contour2d(f) => contour2d_rows(app, ui, f),
         Zcam::Pocket(f) => toolpath_rows(app, ui, &mut f.form),
+        Zcam::Pocket2d(f) => pocket2d_rows(app, ui, f),
     }
 }
 
@@ -1296,6 +1362,28 @@ fn contour2d_rows(app: &mut SolveApp, ui: &mut egui::Ui, f: &mut DialogCamContou
     enter
 }
 
+/// A 2D pocket form: the setup it cuts in, its tool, the stepover between its passes and its
+/// depth. The faces whose region it clears are picked in the view, in the form's face input.
+fn pocket2d_rows(app: &mut SolveApp, ui: &mut egui::Ui, f: &mut DialogCamPocket2d) -> bool {
+    let tools = cam_tools(app);
+    // The model origin first, then each setup of the design.
+    let mut setups: Vec<&str> = Vec::with_capacity(app.session.doc.cam.setups.len() + 1);
+    setups.push(crate::i18n::tr_label("Model origin"));
+    setups.extend(app.session.doc.cam.setups.iter().map(|s| s.name.as_str()));
+    f.setup = f.setup.min(setups.len() - 1);
+    crate::ui_kit::choice_row(ui, "Setup", "cam_pocket2d_setup", &mut f.setup, &setups);
+    if tools.is_empty() {
+        crate::ui_kit::status_line(ui, "Create a tool in the Tool Library first", crate::ui_kit::StatusTone::Dim);
+        return false;
+    }
+    let choices: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    f.tool = f.tool.min(choices.len() - 1);
+    crate::ui_kit::choice_row(ui, crate::i18n::tr("ui.cam.select_tool"), "cam_pocket2d_tool", &mut f.tool, &choices);
+    let mut enter = crate::ui_kit::expr_row(ui, crate::i18n::tr("dialog.cam.pocket.stepover"), &mut f.stepover);
+    enter |= crate::ui_kit::expr_row(ui, crate::i18n::tr("dialog.cam.pocket.depth"), &mut f.depth);
+    enter
+}
+
 /// The commands OK runs for a CAM workspace dialog.
 pub fn zcam_commands(app: &SolveApp, form: &Zcam, inputs: &[SelInput]) -> Result<Vec<(String, Value)>, String> {
     match form {
@@ -1305,6 +1393,7 @@ pub fn zcam_commands(app: &SolveApp, form: &Zcam, inputs: &[SelInput]) -> Result
         Zcam::Contour(f) => toolpath_commands(app, &f.form, "cam.toolpath.contour"),
         Zcam::Contour2d(f) => contour2d_params(app, f, inputs).map(|p| vec![("cam.toolpath.contour2d".to_string(), p)]),
         Zcam::Pocket(f) => toolpath_commands(app, &f.form, "cam.toolpath.pocket"),
+        Zcam::Pocket2d(f) => pocket2d_params(app, f, inputs).map(|p| vec![("cam.toolpath.pocket_2d".to_string(), p)]),
     }
 }
 
