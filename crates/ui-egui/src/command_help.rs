@@ -17,6 +17,7 @@ pub const DOCUMENTED: &[&str] = &[
     "cam.tool.list",
     "cam.toolpath.contour",
     "cam.toolpath.contour2d",
+    "cam.toolpath.facing",
     "cam.toolpath.pocket",
     "cam.toolpath.pocket_2d",
     "canvas.decal",

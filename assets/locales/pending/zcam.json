@@ -20,6 +20,7 @@
     "cmd.cam.tool.list": "Tool Library",
     "cmd.cam.toolpath.contour": "Contour",
     "cmd.cam.toolpath.contour2d": "2D Contour",
+    "cmd.cam.toolpath.facing": "2D Facing",
     "cmd.cam.toolpath.pocket": "Pocket",
     "cmd.cam.toolpath.pocket_2d": "2D Pocket",
     "help.cam.coordinate_system.create": "Creates a programmable machining origin and XYZ orientation.\n\nUse this to define where the machine zero is located on the stock.",
@@ -47,6 +48,7 @@
     "help.cam.tool.list": "Lists the design's tool library: every cutter's kind, diameter and cutting edges.\n\nUse this to check which tools are available before creating or editing one.",
     "help.cam.toolpath.contour": "Cuts around the machined bodies' outlines with the tool's side, leaving the stated stock.\n\nUse this to finish a wall or to cut the part free of its stock.",
     "help.cam.toolpath.contour2d": "Generates a 2.5D profile toolpath offsetting selected edges by the tool radius.\n\nUse this to follow a wall, a slot or an opening the part's outline does not bound.",
+    "help.cam.toolpath.facing": "Removes stock material from the top face to create a flat reference surface.",
     "help.cam.toolpath.pocket": "Clears the area inside the machined bodies' outlines with a zig-zag raster at the stated stepover.\n\nUse this to remove the material inside an outline before a finishing pass.",
     "help.cam.toolpath.pocket_2d": "Clears a closed boundary using offset passes. Use this to machine pockets or large flat areas.",
     "dialog.cam.pocket.stepover": "Stepover",
@@ -59,6 +61,9 @@
     "dialog.cam.drill.absolute_depth": "Absolute needs a depth below the top of the stock",
     "dialog.cam.drill.peck_hint": "Empty takes the tool's flute length",
     "Depth reference": "Depth reference",
+    "Pass extension": "Pass extension",
+    "Stock offset": "Stock offset",
+    "Depth": "Depth",
     "Peck": "Peck",
     "Deep hole": "Deep hole",
     "Hole bottom": "Hole bottom",
@@ -129,7 +134,12 @@
     "dialog.cam.pocket.stepover": "الخطوة الجانبية",
     "dialog.cam.pocket.depth": "العمق الكلي",
     "Clearance height": "ارتفاع الأمان",
-    "Bottom depth": "عمق القاع"
+    "Bottom depth": "عمق القاع",
+    "cmd.cam.toolpath.facing": "تسوية سطح ثنائية الأبعاد",
+    "help.cam.toolpath.facing": "يزيل مادة الخام من الوجه العلوي لينشئ سطحًا مرجعيًا مستويًا.",
+    "Pass extension": "امتداد التمريرة",
+    "Stock offset": "إزاحة المادة الخام",
+    "Depth": "العمق"
   },
   "de": {
     "ui.workspace.cam": "CAM",
@@ -221,7 +231,12 @@
     "dialog.cam.pocket.stepover": "צעד צדי",
     "dialog.cam.pocket.depth": "עומק כולל",
     "Clearance height": "גובה פינוי",
-    "Bottom depth": "עומק תחתון"
+    "Bottom depth": "עומק תחתון",
+    "cmd.cam.toolpath.facing": "עיבוד פני שטח דו-ממדי",
+    "help.cam.toolpath.facing": "מסיר חומר גלם מהפנים העליונים כדי ליצור משטח ייחוס שטוח.",
+    "Pass extension": "הארכת מעבר",
+    "Stock offset": "היסט חומר גלם",
+    "Depth": "עומק"
   },
   "ja": {
     "cmd.cam.toolpath.drill": "Drilling",
@@ -287,7 +302,12 @@
     "dialog.cam.pocket.stepover": "ステップオーバー",
     "dialog.cam.pocket.depth": "総深さ",
     "Clearance height": "クリアランス高さ",
-    "Bottom depth": "底面深さ"
+    "Bottom depth": "底面深さ",
+    "cmd.cam.toolpath.facing": "2D フェーシング",
+    "help.cam.toolpath.facing": "上面から素材を取り除き、平らな基準面を作成します。",
+    "Pass extension": "パス延長",
+    "Stock offset": "素材オフセット",
+    "Depth": "深さ"
   },
   "ko": {
     "ui.workspace.cam": "CAM",
@@ -379,7 +399,12 @@
     "dialog.cam.pocket.stepover": "Bước ngang",
     "dialog.cam.pocket.depth": "Tổng chiều sâu",
     "Clearance height": "Chiều cao an toàn",
-    "Bottom depth": "Chiều sâu đáy"
+    "Bottom depth": "Chiều sâu đáy",
+    "cmd.cam.toolpath.facing": "Phay mặt 2D",
+    "help.cam.toolpath.facing": "Loại bỏ vật liệu phôi khỏi mặt trên để tạo bề mặt chuẩn phẳng.",
+    "Pass extension": "Kéo dài lượt chạy",
+    "Stock offset": "Bù phôi",
+    "Depth": "Chiều sâu"
   },
   "zh": {
     "cmd.cam.toolpath.drill": "Drilling",
@@ -445,6 +470,11 @@
     "dialog.cam.pocket.stepover": "步距",
     "dialog.cam.pocket.depth": "总深度",
     "Clearance height": "安全高度",
-    "Bottom depth": "底面深度"
+    "Bottom depth": "底面深度",
+    "cmd.cam.toolpath.facing": "2D 端面铣削",
+    "help.cam.toolpath.facing": "从顶面去除毛坯材料，形成平整的基准面。",
+    "Pass extension": "走刀延伸",
+    "Stock offset": "毛坯偏置",
+    "Depth": "深度"
   }
 }

@@ -17,6 +17,8 @@ use solidcraft_engine::kernel::FaceSurface;
 
 #[path = "dialogs_cam_drill.rs"]
 pub mod drill;
+#[path = "dialogs_cam_facing.rs"]
+pub mod facing;
 
 use super::{ROUND, joint_row, occurrence, pick, picked_radius, trim, turn};
 use crate::SolveApp;
@@ -234,6 +236,9 @@ pub enum Zcam {
     /// Plunge a tool at the picked holes' rims, in a cycle down to the chosen depth
     /// (`cam.toolpath.drill`).
     Drill(drill::DialogCamDrill),
+    /// Sweep the cutter back and forth across the top of the stock, pass beside pass, down to a
+    /// depth (`cam.toolpath.facing`).
+    Facing(facing::DialogCamFacing),
 }
 
 impl Zcam {
@@ -254,6 +259,7 @@ impl Zcam {
             Zcam::Pocket(_) => "cam.toolpath.pocket",
             Zcam::Pocket2d(_) => "cam.toolpath.pocket_2d",
             Zcam::Drill(_) => "cam.toolpath.drill",
+            Zcam::Facing(_) => "cam.toolpath.facing",
         }
     }
 
@@ -268,6 +274,7 @@ impl Zcam {
             Zcam::Pocket(_) => "POCKET",
             Zcam::Pocket2d(_) => "2D POCKET",
             Zcam::Drill(_) => "DRILLING",
+            Zcam::Facing(_) => "2D FACING",
         }
     }
 }
@@ -1268,6 +1275,7 @@ pub fn start_workspace(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)
             let (f, inputs) = drill::start(app);
             Some((Kind::Cam(Zcam::Drill(f)), inputs))
         }
+        "cam.toolpath.facing" => Some((Kind::Cam(Zcam::Facing(facing::DialogCamFacing::new(app))), Vec::new())),
         _ => None,
     }
 }
@@ -1283,6 +1291,7 @@ pub fn zcam_rows(app: &mut SolveApp, ui: &mut egui::Ui, form: &mut Zcam) -> bool
         Zcam::Pocket(f) => toolpath_rows(app, ui, &mut f.form),
         Zcam::Pocket2d(f) => pocket2d_rows(app, ui, f),
         Zcam::Drill(f) => drill::rows(app, ui, f),
+        Zcam::Facing(f) => facing::draw_facing_dialog(app, ui, f),
     }
 }
 
@@ -1408,6 +1417,7 @@ pub fn zcam_commands(app: &SolveApp, form: &Zcam, inputs: &[SelInput]) -> Result
         Zcam::Pocket(f) => toolpath_commands(app, &f.form, "cam.toolpath.pocket"),
         Zcam::Pocket2d(f) => pocket2d_params(app, f, inputs).map(|p| vec![("cam.toolpath.pocket_2d".to_string(), p)]),
         Zcam::Drill(f) => drill::params(app, f, inputs).map(|p| vec![("cam.toolpath.drill".to_string(), p)]),
+        Zcam::Facing(f) => facing::params(app, f).map(|p| vec![("cam.toolpath.facing".to_string(), p)]),
     }
 }
 
