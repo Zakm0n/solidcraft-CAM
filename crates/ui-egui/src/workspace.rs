@@ -421,7 +421,7 @@ pub const SECTIONS: &[Section] = &[
     // The CAM workspace's Toolpath tab: its setups and coordinate systems first, then the 2.5D
     // milling operations the setups and tools feed.
     Section { tab: "TOOLPATH", panel: "CREATE", promoted: 1, ids: &["cam.coordinate_system.create", "cam.setup.create", "cam.tool.list"] },
-    Section { tab: "TOOLPATH", panel: "2D MILLING", promoted: 1, ids: &["cam.toolpath.contour", "cam.toolpath.pocket"] },
+    Section { tab: "TOOLPATH", panel: "2D MILLING", promoted: 1, ids: &["cam.toolpath.contour", "cam.toolpath.contour2d", "cam.toolpath.pocket"] },
     Section { tab: "TOOLPATH", panel: "3D MILLING", promoted: 1, ids: &[] },
     Section { tab: "TOOLPATH", panel: "OUTPUT", promoted: 1, ids: &["cam.export.gcode"] },
 ];
@@ -1648,7 +1648,11 @@ mod tests {
             "the Toolpath tab offers the origin, the setup and the tool library"
         );
         let milling: Vec<_> = lists[1].1.iter().map(|c| c.id).collect();
-        assert_eq!(milling, ["cam.toolpath.contour", "cam.toolpath.pocket"], "2D Milling offers the contour and pocket operations");
+        assert_eq!(
+            milling,
+            ["cam.toolpath.contour", "cam.toolpath.contour2d", "cam.toolpath.pocket"],
+            "2D Milling offers the contour, 2D contour and pocket operations"
+        );
         assert!(lists[2].1.is_empty(), "3D Milling stays a stub");
         let output: Vec<_> = lists[3].1.iter().map(|c| c.id).collect();
         assert_eq!(output, ["cam.export.gcode"], "Output offers the G-code export");

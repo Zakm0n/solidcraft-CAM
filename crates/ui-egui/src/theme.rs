@@ -1145,6 +1145,10 @@ pub struct Tokens {
     pub preview_sketch: Color32,
     /// Removed material in a feature preview (translucent).
     pub preview_cut: Color32,
+    /// A CAM toolpath's cutting moves, where the cutter is in material.
+    pub cam_path_cut: Color32,
+    /// A CAM toolpath's links: travel between passes and between the edges it follows.
+    pub cam_path_link: Color32,
     /// Navigation cube faces, outline and labels.
     pub cube_face: Color32,
     pub cube_border: Color32,
@@ -1503,6 +1507,8 @@ impl Tokens {
             preview_new: view.preview_new,
             preview_sketch: view.preview_sketch,
             preview_cut: view.preview_cut,
+            cam_path_cut: view.cam_path_cut,
+            cam_path_link: view.cam_path_link,
             cube_face: view.cube_face,
             cube_border: view.cube_border,
             cube_text: view.cube_text,

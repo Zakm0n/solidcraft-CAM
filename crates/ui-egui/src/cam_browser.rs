@@ -8,12 +8,22 @@
 //! another one.
 
 use egui::{Rect, Sense, pos2, vec2};
-use solidcraft_engine::doc::cam::{Toolpath, ToolpathKind};
+use solidcraft_engine::doc::cam::{CamContour2d, Toolpath, ToolpathKind};
 
 use crate::SolveApp;
 use crate::context_menu::{Item, Target};
 use crate::theme::Tokens;
 use crate::ui_kit::{Container, DockEdges, Surface};
+
+/// The 2D contour operations that run in `setup`, in the order they were made.
+fn contours_in(cam: &solidcraft_engine::doc::cam::CamSettings, setup: u64) -> impl Iterator<Item = &CamContour2d> + '_ {
+    cam.contours.iter().filter(move |contour| contour.setup == setup)
+}
+
+/// The 2D contour operations that name no setup the design has: they cut at the model origin.
+fn contours_at_origin(cam: &solidcraft_engine::doc::cam::CamSettings) -> impl Iterator<Item = &CamContour2d> + '_ {
+    cam.contours.iter().filter(move |contour| cam.setup(contour.setup).is_none())
+}
 
 /// The card's inner margin, matching the Browser card's inset.
 const CARD_INSET: f32 = 4.0;
@@ -63,7 +73,7 @@ fn header(ui: &mut egui::Ui) {
 fn body(app: &mut SolveApp, ui: &mut egui::Ui) {
     let t = Tokens::get();
     let cam = app.session.doc.cam.clone();
-    if cam.setups.is_empty() && cam.toolpaths.is_empty() {
+    if cam.setups.is_empty() && cam.toolpaths.is_empty() && cam.contours.is_empty() {
         empty_state(ui);
         return;
     }
@@ -72,16 +82,24 @@ fn body(app: &mut SolveApp, ui: &mut egui::Ui) {
         ui.add_space(t.space_4);
         for setup in &cam.setups {
             let target = format!("cam:toolpaths:setup:{}", setup.id);
-            group_row(ui, &setup.name, cam.toolpaths_in(setup.id).count(), &target);
+            let count = cam.toolpaths_in(setup.id).count() + contours_in(&cam, setup.id).count();
+            group_row(ui, &setup.name, count, &target);
             for toolpath in cam.toolpaths_in(setup.id) {
                 toolpath_row(app, ui, toolpath);
             }
+            for contour in contours_in(&cam, setup.id) {
+                contour_row(app, ui, contour);
+            }
         }
         let unassigned: Vec<&Toolpath> = cam.toolpaths.iter().filter(|p| cam.setup(p.setup).is_none()).collect();
-        if !unassigned.is_empty() {
-            group_row(ui, crate::i18n::tr_label("Model origin"), unassigned.len(), "cam:toolpaths:setup:0");
+        let contours: Vec<&CamContour2d> = contours_at_origin(&cam).collect();
+        if !unassigned.is_empty() || !contours.is_empty() {
+            group_row(ui, crate::i18n::tr_label("Model origin"), unassigned.len() + contours.len(), "cam:toolpaths:setup:0");
             for toolpath in unassigned {
                 toolpath_row(app, ui, toolpath);
+            }
+            for contour in contours {
+                contour_row(app, ui, contour);
             }
         }
         ui.add_space(t.space_4);
@@ -133,6 +151,30 @@ fn toolpath_row(app: &mut SolveApp, ui: &mut egui::Ui, toolpath: &Toolpath) {
     {
         crate::context_menu::open_for(app, at, Target::CamToolpath { id: toolpath.id });
     }
+}
+
+/// One 2D contour under its setup: its name, and the operation and tool it cuts with, and how
+/// many edges it follows.
+fn contour_row(app: &mut SolveApp, ui: &mut egui::Ui, contour: &CamContour2d) {
+    let t = Tokens::get();
+    let kind = crate::i18n::tr_label("2D Contour");
+    let tool = app.session.doc.cam.tool(contour.tool).map(|tool| tool.name.as_str()).unwrap_or("");
+    let edges = contour.target_edges.len();
+    let cuts = if tool.is_empty() { kind.to_string() } else { format!("{kind} · {tool}") };
+    let secondary = format!("{cuts} · {edges}");
+    let response = ui
+        .horizontal(|ui| {
+            ui.add_space(t.space_4 + CHILD_INDENT);
+            ui.label(egui::RichText::new(crate::i18n::tr_name(&contour.name)).size(t.font_body).color(t.text));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(t.space_4);
+                ui.label(egui::RichText::new(secondary).size(t.font_small).color(t.text_dim));
+            });
+        })
+        .response;
+    let target = format!("cam:toolpaths:contour:{}", contour.id);
+    crate::scenario::publish_rect(&target, response.rect);
+    crate::scenario::publish_handle(&target, response.rect.center());
 }
 
 /// One toolpath's menu: exporting it as a G-code program, once it has a feed rate the machine

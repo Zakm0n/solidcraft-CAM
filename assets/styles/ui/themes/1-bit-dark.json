@@ -26,6 +26,8 @@
     "border": "#ffffff",
     "box_crossing": "#ffffff",
     "box_window": "#ffffff",
+    "cam_path_cut": "#ffffff",
+    "cam_path_link": "#ffffff",
     "chip": "#ffffff",
     "construction_geom": "#ffffff",
     "construction_plane": "#000000",

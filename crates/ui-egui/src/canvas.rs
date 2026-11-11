@@ -365,6 +365,8 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj
         app.dialog = Some(d);
         return;
     }
+    // A 2D contour's toolpath, over the model while its dialog is open.
+    crate::dialogs_coupling::cam::contour2d_overlay(app, painter, proj, &mut d);
     if let Kind::Measure { result, show, labels, .. } = &mut d.kind {
         labels.drawn = Default::default();
         if !ui.input(|i| i.pointer.primary_down()) {

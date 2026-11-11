@@ -182,6 +182,8 @@ impl Tokens {
             preview_new: Color32::from_rgb(240, 225, 105),
             preview_sketch: Color32::from_rgb(32, 190, 96),
             preview_cut: Color32::from_rgba_unmultiplied_const(232, 84, 44, 110),
+            cam_path_cut: Color32::from_rgb(0, 132, 96),
+            cam_path_link: Color32::from_rgb(120, 134, 152),
             cube_face: Color32::from_rgb(236, 239, 244),
             cube_border: Color32::from_rgb(85, 94, 110),
             cube_text: Color32::from_rgb(38, 42, 50),
@@ -443,6 +445,9 @@ impl Tokens {
         t.bend_down = Color32::from_rgb(240, 150, 80);
         t.comb_envelope = Color32::from_rgb(195, 130, 255);
         t.comb_teeth = Color32::from_rgb(255, 160, 60);
+        // CAM toolpaths: lightened for the dark view, as the previews are.
+        t.cam_path_cut = Color32::from_rgb(64, 224, 168);
+        t.cam_path_link = Color32::from_rgb(150, 162, 178);
         t.form_ink = t.text;
         t.form_dim = Color32::from_rgb(180, 187, 200);
         t.form_primary = t.accent;

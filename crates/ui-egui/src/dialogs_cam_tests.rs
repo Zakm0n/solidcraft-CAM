@@ -223,6 +223,71 @@ fn the_pocket_dialog_names_the_model_origin_without_a_setup() {
     assert_eq!(cmds[0].1["stock_to_leave"], 0.2);
 }
 
+/// A plate with one cutting value and one of its top edges, for the 2D contour tests: the app,
+/// and a pick of the edge its top face meets at y = 0.
+fn plate_with_top_edge() -> (SolveApp, Sel) {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    app.run("solid.box", json!({"length": 40, "width": 20, "height": 10, "body_name": "Plate"})).unwrap();
+    app.run("cam.tool.create", json!({"name": "6 flat", "diameter": 6.0})).unwrap();
+    let pick = edge(&app, Vec3::new(20.0, 0.0, 10.0));
+    (app, pick)
+}
+
+/// The Toolpath tab's 2D Contour dialog builds `cam.toolpath.contour2d` from the edge it picked,
+/// its setup, its tool and its depths.
+#[test]
+fn the_contour2d_dialog_builds_the_operation() {
+    let (mut app, pick) = plate_with_top_edge();
+    app.run("cam.setup.create", json!({"name": "Roughing"})).unwrap();
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.toolpath.contour2d").expect("the 2D Contour command opens a dialog");
+    d.inputs[0].items = vec![pick];
+    if let Kind::Cam(Zcam::Contour2d(f)) = &mut d.kind {
+        // The design's only setup is chosen, so the operation cuts in it.
+        assert_eq!((f.setup, f.tool), (1, 0));
+        f.name = "Profile".into();
+        f.clearance_height = "2 mm".into();
+        f.bottom_depth = "10 mm".into();
+        f.stepdown = "2.5 mm".into();
+    } else {
+        panic!("cam.toolpath.contour2d has the wrong dialog");
+    }
+    let cmds = apply_commands(&app, &d).unwrap();
+    assert_eq!(cmds[0].0, "cam.toolpath.contour2d");
+    assert_eq!(cmds[0].1["name"], "Profile");
+    assert_eq!(cmds[0].1["tool"], app.session.doc.cam.tools[0].id);
+    assert_eq!(cmds[0].1["setup"], app.session.doc.cam.setups[0].id);
+    assert_eq!(cmds[0].1["clearance_height"], 2.0);
+    assert_eq!(cmds[0].1["bottom_depth"], 10.0);
+    assert_eq!(cmds[0].1["stepdown"], 2.5);
+    let edges = cmds[0].1["target_edges"].as_array().expect("the picked edges");
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0].as_array().map(Vec::len), Some(3), "a pick is a point on the edge: {edges:?}");
+    for (id, params) in cmds {
+        app.run(&id, params).unwrap();
+    }
+    let contour = app.session.doc.cam.contours.first().expect("the design has the contour");
+    assert_eq!((contour.name.as_str(), contour.target_edges.len()), ("Profile", 1));
+    assert_eq!((contour.bottom_depth, contour.stepdown, contour.clearance_height), (10.0, 2.5, 2.0));
+}
+
+/// The dialog previews its toolpath for the view, from a scratch session: the design gains no
+/// contour, and the path runs down the cut levels its depths ask for.
+#[test]
+fn the_contour2d_dialog_previews_its_toolpath_without_changing_the_design() {
+    let (app, pick) = plate_with_top_edge();
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.toolpath.contour2d").expect("the 2D Contour command opens a dialog");
+    d.inputs[0].items = vec![pick];
+    let Kind::Cam(Zcam::Contour2d(f)) = &mut d.kind else { panic!("cam.toolpath.contour2d has the wrong dialog") };
+    f.bottom_depth = "10 mm".into();
+    f.stepdown = "2.5 mm".into();
+    let points = contour2d_path(&app, f, &d.inputs);
+    assert!(points.len() >= 8, "a closed edge's offset round two passes: {}", points.len());
+    assert!(points.iter().flatten().all(|v| v.is_finite()), "every waypoint is a number: {points:?}");
+    let levels: std::collections::BTreeSet<u64> = points.iter().map(|p| p[2].to_bits()).collect();
+    assert_eq!(levels.len(), 4, "10 mm at 2.5 mm a pass is four cut levels: {points:?}");
+    assert!(app.session.doc.cam.contours.is_empty(), "a preview never changes the design");
+}
+
 /// The Output button asks where to save the program, then writes the G-code there; with no
 /// toolpath it says so without opening a picker.
 #[test]

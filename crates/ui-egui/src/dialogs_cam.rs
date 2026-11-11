@@ -220,6 +220,9 @@ pub enum Zcam {
     ToolLibrary(DialogCamToolLibrary),
     /// Follow a part's outline with the side of the cutter (`cam.toolpath.contour`).
     Contour(DialogCamContour),
+    /// Follow the picked edges with the side of the cutter, offset by its radius
+    /// (`cam.toolpath.contour2d`).
+    Contour2d(DialogCamContour2d),
     /// Clear the material inside a part's outline (`cam.toolpath.pocket`).
     Pocket(DialogCamPocket),
 }
@@ -238,6 +241,7 @@ impl Zcam {
             }
             Zcam::ToolLibrary(_) => "cam.tool.list",
             Zcam::Contour(_) => "cam.toolpath.contour",
+            Zcam::Contour2d(_) => "cam.toolpath.contour2d",
             Zcam::Pocket(_) => "cam.toolpath.pocket",
         }
     }
@@ -249,6 +253,7 @@ impl Zcam {
             Zcam::CoordinateSystem(_) => "COORDINATE SYSTEM",
             Zcam::ToolLibrary(_) => "TOOL LIBRARY",
             Zcam::Contour(_) => "CONTOUR",
+            Zcam::Contour2d(_) => "2D CONTOUR",
             Zcam::Pocket(_) => "POCKET",
         }
     }
@@ -1050,6 +1055,130 @@ impl std::ops::DerefMut for DialogCamPocket {
     }
 }
 
+/// 2D Contour: follow the picked edges with the side of the cutter (`cam.toolpath.contour2d`).
+///
+/// The edges are picked in the view; the engine reads their exact B-rep curves, offsets them by
+/// the tool's radius to the open side and repeats the path down to `bottom_depth`.
+#[derive(Clone, Debug)]
+pub struct DialogCamContour2d {
+    /// Empty: the command names it "2D Contour" and the first free number.
+    pub name: String,
+    /// Index into the setup choices: 0 is the model origin, n is `doc.cam.setups[n - 1]`.
+    pub setup: usize,
+    /// Index into the design's tools, as `cam.tool.list` reports them.
+    pub tool: usize,
+    /// How high the cutter travels between passes, above the stock, in mm. Empty is the
+    /// command's own default of 0.
+    pub clearance_height: String,
+    /// How deep it cuts below the top of the stock, in mm.
+    pub bottom_depth: String,
+    /// How deep one pass cuts, in mm.
+    pub stepdown: String,
+    /// The toolpath the view draws: the parameters it was made from, and its points. The command
+    /// is run on a scratch session only when the parameters change, so a preview never changes
+    /// the design and a still dialog costs nothing.
+    preview: Option<(String, Vec<[f64; 3]>)>,
+}
+
+impl DialogCamContour2d {
+    fn new(app: &SolveApp) -> Self {
+        DialogCamContour2d {
+            name: String::new(),
+            // A design with setups cuts in its first one; without, in the model origin.
+            setup: usize::from(!app.session.doc.cam.setups.is_empty()),
+            tool: 0,
+            clearance_height: String::new(),
+            bottom_depth: crate::length_input::default(&app.session.doc, "10"),
+            stepdown: crate::length_input::default(&app.session.doc, "2"),
+            preview: None,
+        }
+    }
+}
+
+/// The 2D contour's parameters: the tool, the picked edges, the setup it cuts in and its depths.
+/// A picked point stands for the edge it lies on; the engine finds that edge's exact curve.
+fn contour2d_params(app: &SolveApp, f: &DialogCamContour2d, inputs: &[SelInput]) -> Result<Value, String> {
+    let s = &app.session;
+    let tool = s.doc.cam.tools.get(f.tool).ok_or_else(|| "choose a tool (the design's Tool Library is empty)".to_string())?;
+    let edges: Vec<Value> =
+        inputs.first().map(|i| i.items.edge_points()).unwrap_or_default().into_iter().map(crate::selection::point_value).collect();
+    if edges.is_empty() {
+        return Err("select the edges the cutter follows".into());
+    }
+    let length = |label: &str, text: &str| -> Result<f64, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(format!("enter {}", crate::i18n::tr_label(label)));
+        }
+        crate::length_input::eval(&s.doc, text, solidcraft_engine::doc::expr::Kind::Length)
+            .map_err(|e| format!("{}: {e}", crate::i18n::tr_label(label)))
+    };
+    let bottom_depth = length("Bottom depth", &f.bottom_depth)?;
+    let stepdown = length("Step down", &f.stepdown)?;
+    let mut p = json!({ "tool": tool.id, "target_edges": edges, "bottom_depth": bottom_depth, "stepdown": stepdown });
+    if let Some(setup) = f.setup.checked_sub(1).and_then(|i| s.doc.cam.setups.get(i)) {
+        p["setup"] = json!(setup.id);
+    }
+    if !f.clearance_height.trim().is_empty() {
+        p["clearance_height"] = json!(length("Clearance height", &f.clearance_height)?);
+    }
+    let name = f.name.trim();
+    if !name.is_empty() {
+        p["name"] = json!(name);
+    }
+    Ok(p)
+}
+
+/// The toolpath the open 2D contour's parameters make now, for the view to draw. It comes from a
+/// scratch session, so nothing is added to the design; an incomplete form has no path.
+pub fn contour2d_path(app: &SolveApp, f: &mut DialogCamContour2d, inputs: &[SelInput]) -> Vec<[f64; 3]> {
+    let Ok(params) = contour2d_params(app, f, inputs) else { return Vec::new() };
+    let key = params.to_string();
+    if let Some((shown, points)) = &f.preview
+        && *shown == key
+    {
+        return points.clone();
+    }
+    let points: Vec<[f64; 3]> = app
+        .session
+        .scratch()
+        .execute("cam.toolpath.contour2d", &params)
+        .ok()
+        .and_then(|reply| reply.get("waypoints").and_then(Value::as_array).cloned())
+        .map(|list| list.iter().filter_map(waypoint).collect())
+        .unwrap_or_default();
+    f.preview = Some((key, points.clone()));
+    points
+}
+
+/// A waypoint's `[x, y, z]`, unless the reply holds a number the view cannot place.
+fn waypoint(point: &Value) -> Option<[f64; 3]> {
+    let list = point.as_array()?;
+    let p = [list.first()?.as_f64()?, list.get(1)?.as_f64()?, list.get(2)?.as_f64()?];
+    p.iter().all(|v| v.is_finite()).then_some(p)
+}
+
+/// Draw the open 2D contour's toolpath over the model: its cutting moves in the cut colour, and
+/// the links between passes and between the edges it follows in the link colour. An incomplete
+/// form, or one the command refuses, draws nothing.
+pub fn contour2d_overlay(app: &mut SolveApp, painter: &Painter, proj: &Proj, d: &mut Dialog) {
+    let Dialog { kind, inputs, .. } = d;
+    let Kind::Cam(Zcam::Contour2d(f)) = kind else { return };
+    let points = contour2d_path(app, f, inputs);
+    let t = Tokens::get();
+    let mut segments = 0;
+    for pair in points.windows(2) {
+        let at = |p: [f64; 3]| proj.to_screen(Vec3::new(p[0], p[1], p[2]));
+        let (Some(from), Some(to)) = (at(pair[0]), at(pair[1])) else { continue };
+        // A level change plunges: that move is a link, not a cut.
+        let cutting = (pair[0][2] - pair[1][2]).abs() <= 1e-9;
+        let (colour, width) = if cutting { (t.cam_path_cut, 2.0) } else { (t.cam_path_link, 1.0) };
+        painter.line_segment([from, to], egui::Stroke::new(width, colour));
+        segments += 1;
+    }
+    crate::scenario::publish_count("cam:contour2d:segments", segments as f64);
+}
+
 /// Start the CAM workspace dialog `id` opens; none for another command.
 pub fn start_workspace(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
     match id {
@@ -1060,6 +1189,7 @@ pub fn start_workspace(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)
         "cam.setup.create" => Some((Kind::Cam(Zcam::Setup(DialogCamSetup::new(app))), vec![SelInput::new("Bodies", BODIES, true)])),
         "cam.tool.list" => Some((Kind::Cam(Zcam::ToolLibrary(DialogCamToolLibrary::new(app))), Vec::new())),
         "cam.toolpath.contour" => Some((Kind::Cam(Zcam::Contour(DialogCamContour::new(app))), Vec::new())),
+        "cam.toolpath.contour2d" => Some((Kind::Cam(Zcam::Contour2d(DialogCamContour2d::new(app))), vec![SelInput::new("Edges", EDGES, true)])),
         "cam.toolpath.pocket" => Some((Kind::Cam(Zcam::Pocket(DialogCamPocket::new(app))), Vec::new())),
         _ => None,
     }
@@ -1072,6 +1202,7 @@ pub fn zcam_rows(app: &mut SolveApp, ui: &mut egui::Ui, form: &mut Zcam) -> bool
         Zcam::CoordinateSystem(f) => coordinate_system_rows(app, ui, f),
         Zcam::ToolLibrary(f) => tool_rows(app, ui, f),
         Zcam::Contour(f) => toolpath_rows(app, ui, &mut f.form),
+        Zcam::Contour2d(f) => contour2d_rows(app, ui, f),
         Zcam::Pocket(f) => toolpath_rows(app, ui, &mut f.form),
     }
 }
@@ -1141,6 +1272,30 @@ fn toolpath_rows(app: &mut SolveApp, ui: &mut egui::Ui, f: &mut DialogCamToolpat
     enter
 }
 
+/// A 2D contour form: its name, the setup it cuts in, its tool and the depths it cuts to. The
+/// edges it follows are picked in the view, in the form's edge input.
+fn contour2d_rows(app: &mut SolveApp, ui: &mut egui::Ui, f: &mut DialogCamContour2d) -> bool {
+    let tools = cam_tools(app);
+    let mut enter = crate::ui_kit::text_row(ui, "Name", &mut f.name, "").0;
+    // The model origin first, then each setup of the design.
+    let mut setups: Vec<&str> = Vec::with_capacity(app.session.doc.cam.setups.len() + 1);
+    setups.push(crate::i18n::tr_label("Model origin"));
+    setups.extend(app.session.doc.cam.setups.iter().map(|s| s.name.as_str()));
+    f.setup = f.setup.min(setups.len() - 1);
+    crate::ui_kit::choice_row(ui, "Setup", "cam_contour2d_setup", &mut f.setup, &setups);
+    if tools.is_empty() {
+        crate::ui_kit::status_line(ui, "Create a tool in the Tool Library first", crate::ui_kit::StatusTone::Dim);
+        return enter;
+    }
+    let choices: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    f.tool = f.tool.min(choices.len() - 1);
+    crate::ui_kit::choice_row(ui, crate::i18n::tr("ui.cam.select_tool"), "cam_contour2d_tool", &mut f.tool, &choices);
+    enter |= crate::ui_kit::expr_row(ui, "Clearance height", &mut f.clearance_height);
+    enter |= crate::ui_kit::expr_row(ui, "Bottom depth", &mut f.bottom_depth);
+    enter |= crate::ui_kit::expr_row(ui, "Step down", &mut f.stepdown);
+    enter
+}
+
 /// The commands OK runs for a CAM workspace dialog.
 pub fn zcam_commands(app: &SolveApp, form: &Zcam, inputs: &[SelInput]) -> Result<Vec<(String, Value)>, String> {
     match form {
@@ -1148,6 +1303,7 @@ pub fn zcam_commands(app: &SolveApp, form: &Zcam, inputs: &[SelInput]) -> Result
         Zcam::CoordinateSystem(f) => coordinate_system_commands(f),
         Zcam::ToolLibrary(f) => tool_commands(app, f),
         Zcam::Contour(f) => toolpath_commands(app, &f.form, "cam.toolpath.contour"),
+        Zcam::Contour2d(f) => contour2d_params(app, f, inputs).map(|p| vec![("cam.toolpath.contour2d".to_string(), p)]),
         Zcam::Pocket(f) => toolpath_commands(app, &f.form, "cam.toolpath.pocket"),
     }
 }
