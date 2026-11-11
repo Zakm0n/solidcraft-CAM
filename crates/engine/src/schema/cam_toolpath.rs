@@ -1,5 +1,6 @@
 //! Contracts and result types for the commands in `cmd/cam_toolpath.rs`: contour and pocket
-//! toolpaths (`cam.toolpath.contour` and `cam.toolpath.pocket`).
+//! toolpaths (`cam.toolpath.contour` and `cam.toolpath.pocket`), and the 2D contour operation
+//! that follows picked edges (`cam.toolpath.contour2d`).
 //!
 //! The handlers read their parameters from the raw JSON, so each key here accepts what its
 //! handler reads and fails with the handler's message. The ranges are shared as `*_PROBLEM`
@@ -18,12 +19,16 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use solidcraft_doc::cam::ToolpathKind;
 
+use super::types::EdgeRefs;
+
 /// A feed, plunge or spindle rate is 0 (not stated) to 1,000,000.
 pub const RATE_PROBLEM: &str = "must be a number from 0 to 1000000";
 /// A depth or stepover is above 0 and at most 1000 mm.
 pub const DEPTH_PROBLEM: &str = "must be a number above 0 and at most 1000";
 /// Material left for a finishing pass is 0 to 1000 mm.
 pub const STOCK_TO_LEAVE_PROBLEM: &str = "must be a number from 0 to 1000";
+/// A clearance height above the stock's top is 0 to 1000 mm.
+pub const CLEARANCE_HEIGHT_PROBLEM: &str = "must be a number from 0 to 1000";
 
 /// The kind of operation a toolpath runs, in the spellings a design saves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -172,6 +177,35 @@ impl JsonSchema for StockToLeave {
     }
 }
 
+/// `clearance_height`: 0 to 1000 mm above the top of the stock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClearanceHeight(pub f64);
+
+impl<'de> Deserialize<'de> for ClearanceHeight {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Value::deserialize(d)?
+            .as_f64()
+            .filter(|x| x.is_finite() && (0.0..=1000.0).contains(x))
+            .map(ClearanceHeight)
+            .ok_or_else(|| D::Error::custom(CLEARANCE_HEIGHT_PROBLEM))
+    }
+}
+
+impl JsonSchema for ClearanceHeight {
+    fn schema_name() -> Cow<'static, str> {
+        "CamClearanceHeight".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "How high above the top of the stock the cutter travels between passes, in mm: 0 to 1000.",
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1000
+        })
+    }
+}
+
 /// The parameters a contour or pocket toolpath takes: its setup, its tool, the bodies it cuts
 /// and the cutting values it runs at.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -214,6 +248,36 @@ pub struct ToolpathParams {
     /// How much material the operation leaves for a finishing pass, in mm. Default: 0 (none).
     #[serde(default)]
     pub stock_to_leave: Option<StockToLeave>,
+}
+
+/// The parameters a 2D contour toolpath takes: the edges it follows, the setup and tool it cuts
+/// with, and the depths it cuts at.
+///
+/// Unlike [`ToolpathParams`], which works from the outlines of whole bodies, the edges are the
+/// ones the call picks: the engine offsets each by the tool's radius and follows it.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct CamContour2dParams {
+    /// The setup it runs in: its machine zero, axes and stock. Default: the model origin and the
+    /// model's own axes, with the stock read from the bodies the edges lie on.
+    #[serde(default)]
+    pub setup: Option<u64>,
+    /// The tool it cuts with: a tool's id in this design. Its radius offsets the edges.
+    pub tool: u64,
+    /// The edges it follows: a point on each, or `{body, index}`. 1 to 1000 edges.
+    pub target_edges: EdgeRefs,
+    /// Its name in the browser and in its program: 1–128 characters, not another operation's.
+    /// Default: "2D Contour" and the first number no contour operation's name has.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// How high above the top of the stock the cutter travels between passes, in mm. Default: 0
+    /// (at the top of the stock).
+    #[serde(default)]
+    pub clearance_height: Option<ClearanceHeight>,
+    /// How deep the operation cuts below the top of the stock, in mm.
+    pub bottom_depth: Depth,
+    /// How deep one pass cuts, in mm.
+    pub stepdown: Depth,
 }
 
 /// One cutter path boundary, as the commands report it: a closed loop of the part's exact
@@ -285,6 +349,48 @@ pub struct ToolpathReply {
     pub cut_levels: Vec<f64>,
     /// The part's outline loops, the outer ones before the holes.
     pub boundaries: Vec<BoundaryLoop>,
+    /// In the warn parameter-check mode: what the call's parameters got wrong.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_warnings: Vec<String>,
+}
+
+/// A 2D contour operation as the command reports it and as the design stores it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamContour2dSummary {
+    /// Its identity in the design; never reused.
+    pub id: u64,
+    /// Its name in the browser and in its program.
+    pub name: String,
+    /// The setup it runs in; 0 is the model origin.
+    pub setup: u64,
+    /// The tool it cuts with.
+    pub tool: u64,
+    /// The edges it follows, by persistent edge name.
+    pub target_edges: Vec<String>,
+    /// How high above the top of the stock the cutter travels between passes, in mm.
+    pub clearance_height: f64,
+    /// How deep the operation cuts below the top of the stock, in mm.
+    pub bottom_depth: f64,
+    /// How deep one pass cuts, in mm.
+    pub stepdown: f64,
+}
+
+/// What `cam.toolpath.contour2d` returns: the stored operation and the toolpath it generated.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CamContour2dOutput {
+    /// The contour operation as it now is.
+    pub contour: CamContour2dSummary,
+    /// How many contour operations the design has now.
+    pub count: usize,
+    /// How many passes down to `bottom_depth` it takes.
+    pub passes: usize,
+    /// The height of each pass above the machine zero along the setup's Z, deepest last, in mm.
+    pub cut_levels: Vec<f64>,
+    /// The generated toolpath, in cutting order: its points in the setup's machine coordinates,
+    /// in mm. Each edge contributes its offset polyline once per cut level.
+    pub waypoints: Vec<[f64; 3]>,
+    /// The toolpath's cutting length, in mm.
+    pub length: f64,
     /// In the warn parameter-check mode: what the call's parameters got wrong.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_warnings: Vec<String>,

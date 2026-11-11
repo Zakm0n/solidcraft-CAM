@@ -1,7 +1,7 @@
 //! The CAM data a design keeps: setups, the tool library and toolpaths (`crate::cam`).
 
 use crate::Document;
-use crate::cam::{CamSettings, Setup, Stock, Tool, ToolKind, Toolpath, ToolpathKind};
+use crate::cam::{CamContour2d, CamSettings, Setup, Stock, Tool, ToolKind, Toolpath, ToolpathKind};
 
 fn example_setup() -> Setup {
     Setup {
@@ -15,6 +15,19 @@ fn example_setup() -> Setup {
 
 fn example_tool() -> Tool {
     Tool { id: 6, name: "6 mm bull nose".into(), kind: ToolKind::BullNoseEndMill, diameter: 6.0, corner_radius: 1.0, flute_length: 20.0, flutes: 3 }
+}
+
+fn example_contour() -> CamContour2d {
+    CamContour2d {
+        id: 8,
+        name: "2D Contour 1".into(),
+        setup: 5,
+        tool: 6,
+        target_edges: vec!["F1:side:l1|F1:top#1~1".into()],
+        clearance_height: 5.0,
+        bottom_depth: 8.0,
+        stepdown: 2.0,
+    }
 }
 
 fn example_toolpath() -> Toolpath {
@@ -41,6 +54,7 @@ fn cam_data_round_trips_through_a_design_file() {
     doc.cam.setups.push(example_setup());
     doc.cam.tools.push(example_tool());
     doc.cam.toolpaths.push(example_toolpath());
+    doc.cam.contours.push(example_contour());
     let file = serde_json::to_value(&doc).unwrap();
     assert_eq!(file["cam"]["setups"][0]["coordinate_system"], 3);
     assert_eq!(file["cam"]["setups"][0]["stock"]["size"][2], 20.0);
@@ -48,6 +62,9 @@ fn cam_data_round_trips_through_a_design_file() {
     assert_eq!(file["cam"]["tools"][0]["flutes"], 3);
     assert_eq!(file["cam"]["toolpaths"][0]["kind"], "pocket");
     assert_eq!(file["cam"]["toolpaths"][0]["stock_to_leave"], 0.2);
+    assert_eq!(file["cam"]["contours"][0]["target_edges"][0], "F1:side:l1|F1:top#1~1");
+    assert_eq!(file["cam"]["contours"][0]["clearance_height"], 5.0);
+    assert_eq!(file["cam"]["contours"][0]["stepdown"], 2.0);
     let opened: Document = serde_json::from_value(file).unwrap();
     assert_eq!(opened.cam, doc.cam);
 }
@@ -74,6 +91,7 @@ fn a_saved_cam_record_missing_its_newer_fields_opens_with_defaults() {
     assert_eq!(cam.tools[0].kind, ToolKind::FlatEndMill);
     assert_eq!(cam.toolpaths[0].kind, ToolpathKind::Contour);
     assert_eq!(cam.toolpaths[0].total_depth, 0.0);
+    assert!(cam.contours.is_empty(), "a design saved before 2D contours has none");
 }
 
 #[test]
@@ -89,6 +107,17 @@ fn cam_items_take_ids_from_the_designs_one_counter() {
     doc.cam.tools.push(example_tool());
     doc.cam.toolpaths.push(example_toolpath());
     assert_eq!(doc.allocate_id().unwrap(), 8);
+}
+
+#[test]
+fn a_contour_round_trips_and_takes_an_id_from_the_designs_one_counter() {
+    let mut doc = Document::new("Contour");
+    doc.cam.contours.push(example_contour());
+    let opened: Document = serde_json::from_value(serde_json::to_value(&doc).unwrap()).unwrap();
+    assert_eq!(opened.cam.contours, doc.cam.contours);
+    assert_eq!(doc.cam.contour(8), Some(&example_contour()));
+    assert_eq!(doc.cam.contour(9), None);
+    assert_eq!(doc.allocate_id().unwrap(), 9);
 }
 
 #[test]

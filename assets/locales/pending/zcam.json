@@ -19,6 +19,7 @@
     "cmd.cam.tool.edit": "Edit Tool",
     "cmd.cam.tool.list": "Tool Library",
     "cmd.cam.toolpath.contour": "Contour",
+    "cmd.cam.toolpath.contour2d": "2D Contour",
     "cmd.cam.toolpath.pocket": "Pocket",
     "help.cam.coordinate_system.create": "Creates a programmable machining origin and XYZ orientation.\n\nUse this to define where the machine zero is located on the stock.",
     "help.cam.export.gcode": "Writes the design's toolpaths as an ISO G-code program in millimetres.\n\nUse this when a machine or a simulator needs the program: contour follows each outline with the cutter's side, pocket clears the inside with a zig-zag raster, and a toolpath without a feed rate is refused.",
@@ -44,6 +45,7 @@
     "help.cam.setup.create": "Creates a machining setup: the coordinate system, the raw stock and the bodies it machines.\n\nUse this when several toolpaths are cut in one workholding of the stock.",
     "help.cam.tool.list": "Lists the design's tool library: every cutter's kind, diameter and cutting edges.\n\nUse this to check which tools are available before creating or editing one.",
     "help.cam.toolpath.contour": "Cuts around the machined bodies' outlines with the tool's side, leaving the stated stock.\n\nUse this to finish a wall or to cut the part free of its stock.",
+    "help.cam.toolpath.contour2d": "Generates a 2.5D profile toolpath offsetting selected edges by the tool radius.\n\nUse this to follow a wall, a slot or an opening the part's outline does not bound.",
     "help.cam.toolpath.pocket": "Clears the area inside the machined bodies' outlines with a zig-zag raster at the stated stepover.\n\nUse this to remove the material inside an outline before a finishing pass."
   },
   "ar": {

@@ -4,7 +4,7 @@
 use serde_json::json;
 use solidcraft_doc::cam::{Setup, Stock};
 
-use super::{ToolpathParams, ToolpathReply};
+use super::{CamContour2dOutput, CamContour2dParams, ClearanceHeight, Depth, ToolpathParams, ToolpathReply};
 use crate::Session;
 use crate::schema::tests::{assert_keys, conforms};
 use crate::schema::{ParamCheck, input_schema_for, output_schema_for};
@@ -194,4 +194,61 @@ fn a_cut_that_leaves_the_part_is_refused() {
     assert!(s.execute("cam.toolpath.contour", &json!({"tool": tool, "feed_rate": -1})).is_err());
     assert!(s.execute("cam.toolpath.contour", &json!({"tool": tool, "stock_to_leave": 1001})).is_err());
     assert!(s.doc.cam.toolpaths.is_empty(), "a refused call changes nothing");
+}
+
+/// The 2D contour's contract lists exactly the keys it takes, and its reply matches what it
+/// says it returns.
+#[test]
+fn contour2d_schemas_and_the_key_check_agree() {
+    assert_keys(input_schema_for::<CamContour2dParams>(), &["bottom_depth", "clearance_height", "name", "setup", "stepdown", "target_edges", "tool"]);
+    let schema = output_schema_for::<CamContour2dOutput>();
+    let schema = schema.as_value();
+    let reply = json!({
+        "contour": {
+            "id": 14,
+            "name": "2D Contour 1",
+            "setup": 0,
+            "tool": 6,
+            "target_edges": ["F1:side:l1|F1:top#1~1"],
+            "clearance_height": 5.0,
+            "bottom_depth": 8.0,
+            "stepdown": 2.0
+        },
+        "count": 1,
+        "passes": 4,
+        "cut_levels": [6.0, 4.0, 2.0, 0.0],
+        "waypoints": [[10.0, 0.0, 6.0], [20.0, 0.0, 6.0]],
+        "length": 40.0
+    });
+    assert!(conforms(schema, schema, &reply), "{reply} doesn't match {schema}");
+}
+
+/// The 2D contour's contract reads edge picks and depths, and refuses what the engine could not
+/// cut with.
+#[test]
+fn contour2d_params_take_edge_picks_and_refuse_hostile_values() {
+    let params: CamContour2dParams = serde_json::from_value(json!({
+        "tool": 6,
+        "target_edges": [[10, 0, 4], {"body": "Plate", "index": 2}],
+        "clearance_height": 5,
+        "bottom_depth": 8,
+        "stepdown": 2
+    }))
+    .expect("a call naming edge picks and depths is accepted");
+    assert_eq!(params.target_edges.0.len(), 2);
+    assert_eq!(params.clearance_height, Some(ClearanceHeight(5.0)));
+    assert_eq!(params.bottom_depth, Depth(8.0));
+    assert_eq!(params.stepdown, Depth(2.0));
+    assert_eq!(params.name, None);
+    for (key, value, why) in [
+        ("stepdown", json!(0), "a stepdown of 0"),
+        ("bottom_depth", json!(-1), "a negative depth"),
+        ("clearance_height", json!(1001), "a clearance above 1000 mm"),
+    ] {
+        let mut call = json!({"tool": 6, "target_edges": [[0, 0, 0]], "bottom_depth": 8, "stepdown": 2});
+        call.as_object_mut().expect("an object").insert(key.to_string(), value);
+        assert!(serde_json::from_value::<CamContour2dParams>(call).is_err(), "{why} is refused");
+    }
+    let no_edges = json!({"tool": 6, "target_edges": [], "bottom_depth": 8, "stepdown": 2});
+    assert!(serde_json::from_value::<CamContour2dParams>(no_edges).is_err(), "a call with no edges is refused");
 }

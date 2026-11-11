@@ -3,8 +3,9 @@
 //!
 //! A [`CoordinateSystem`] places the machine zero and the machine's own X, Y and Z directions
 //! (`cam.coordinate_system.create`); a [`Setup`] takes that origin and names the raw stock, a
-//! [`Tool`] is one cutter of the design's library, and a [`Toolpath`] is one operation (facing,
-//! contouring or pocketing) of a setup, cut with one tool.
+//! [`Tool`] is one cutter of the design's library, a [`Toolpath`] is one operation (facing,
+//! contouring or pocketing) of a setup, cut with one tool, and a [`CamContour2d`] is a profile
+//! operation that follows edges the user picked.
 //!
 //! Nothing here is geometry: the operations name the bodies and the coordinate system they work
 //! from, and the engine reads the part's exact B-rep when it generates a path. Setups, tools and
@@ -61,21 +62,25 @@ pub struct CamSettings {
     /// The operations, each in one setup and on one tool.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub toolpaths: Vec<Toolpath>,
+    /// The 2D contour operations, each in one setup and on one tool.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub contours: Vec<CamContour2d>,
 }
 
 impl CamSettings {
     /// Whether the design keeps no CAM data at all (it then saves without the `cam` key).
     pub fn is_empty(&self) -> bool {
-        self.setups.is_empty() && self.tools.is_empty() && self.toolpaths.is_empty()
+        self.setups.is_empty() && self.tools.is_empty() && self.toolpaths.is_empty() && self.contours.is_empty()
     }
 
-    /// Every identity these keep: setups, tools and toolpaths take ids from the design's one
-    /// counter, as every other item does.
+    /// Every identity these keep: setups, tools, toolpaths and contours take ids from the
+    /// design's one counter, as every other item does.
     pub fn ids(&self) -> impl Iterator<Item = u64> + '_ {
         let setups = self.setups.iter().map(|s| s.id);
         let tools = self.tools.iter().map(|t| t.id);
         let toolpaths = self.toolpaths.iter().map(|p| p.id);
-        setups.chain(tools).chain(toolpaths)
+        let contours = self.contours.iter().map(|c| c.id);
+        setups.chain(tools).chain(toolpaths).chain(contours)
     }
 
     /// The setup with identity `id`.
@@ -91,6 +96,11 @@ impl CamSettings {
     /// The toolpaths that run in setup `setup`, in the order they were made.
     pub fn toolpaths_in(&self, setup: u64) -> impl Iterator<Item = &Toolpath> + '_ {
         self.toolpaths.iter().filter(move |p| p.setup == setup)
+    }
+
+    /// The 2D contour operation with identity `id`.
+    pub fn contour(&self, id: u64) -> Option<&CamContour2d> {
+        self.contours.iter().find(|c| c.id == id)
     }
 }
 
@@ -227,6 +237,49 @@ impl Default for Toolpath {
             depth_per_pass: 0.0,
             total_depth: 0.0,
             stock_to_leave: 0.0,
+        }
+    }
+}
+
+/// A 2D contour operation: a profile toolpath that offsets the edges the user picked by the
+/// tool's radius and cuts them, pass by pass, down to a depth.
+///
+/// Unlike a [`Toolpath`], which contours the whole outline of the bodies it machines, a contour
+/// works from named edges of the part, so it can follow a wall or a slot the outline does not
+/// bound. The engine reads the exact B-rep to generate the path; nothing here is geometry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CamContour2d {
+    /// Its identity in the design; never reused.
+    pub id: u64,
+    /// Its name in the browser and in its program.
+    pub name: String,
+    /// The [`Setup`] it runs in: its machine zero, axes and stock.
+    pub setup: u64,
+    /// The [`Tool`] it cuts with.
+    pub tool: u64,
+    /// The edges it follows, by their persistent names
+    /// (`crate::persistent_name::EdgeName`), so they follow the part as it changes.
+    pub target_edges: Vec<String>,
+    /// The height it travels at between passes, above the top of the stock, in mm.
+    pub clearance_height: f64,
+    /// How deep the operation cuts below the top of the stock, in mm.
+    pub bottom_depth: f64,
+    /// How deep one pass cuts, in mm.
+    pub stepdown: f64,
+}
+
+impl Default for CamContour2d {
+    fn default() -> Self {
+        CamContour2d {
+            id: 0,
+            name: String::new(),
+            setup: 0,
+            tool: 0,
+            target_edges: Vec::new(),
+            clearance_height: 0.0,
+            bottom_depth: 0.0,
+            stepdown: 0.0,
         }
     }
 }
