@@ -1,7 +1,9 @@
 //! The CAM data a design keeps: setups, the tool library and toolpaths (`crate::cam`).
 
 use crate::Document;
-use crate::cam::{CamContour2d, CamDrill, CamSettings, DrillCycle, DrillDepthReference, Setup, Stock, Tool, ToolKind, Toolpath, ToolpathKind};
+use crate::cam::{
+    CamContour2d, CamDrill, CamFacing, CamSettings, DrillCycle, DrillDepthReference, Setup, Stock, Tool, ToolKind, Toolpath, ToolpathKind,
+};
 
 fn example_setup() -> Setup {
     Setup {
@@ -45,6 +47,10 @@ fn example_drill() -> CamDrill {
     }
 }
 
+fn example_facing() -> CamFacing {
+    CamFacing { id: 10, name: "2D Facing 1".into(), setup: 5, tool: 6, stepover: 0.7, pass_extension: 2.0, stock_offset: 1.0, depth: 1.0 }
+}
+
 fn example_toolpath() -> Toolpath {
     Toolpath {
         id: 7,
@@ -71,6 +77,7 @@ fn cam_data_round_trips_through_a_design_file() {
     doc.cam.toolpaths.push(example_toolpath());
     doc.cam.contours.push(example_contour());
     doc.cam.drills.push(example_drill());
+    doc.cam.facings.push(example_facing());
     let file = serde_json::to_value(&doc).unwrap();
     assert_eq!(file["cam"]["setups"][0]["coordinate_system"], 3);
     assert_eq!(file["cam"]["setups"][0]["stock"]["size"][2], 20.0);
@@ -85,6 +92,10 @@ fn cam_data_round_trips_through_a_design_file() {
     assert_eq!(file["cam"]["drills"][0]["cycle_type"], "peck");
     assert_eq!(file["cam"]["drills"][0]["depth_reference"], "hole_bottom");
     assert_eq!(file["cam"]["drills"][0]["peck_depth"], 2.0);
+    assert_eq!(file["cam"]["facings"][0]["stepover"], 0.7);
+    assert_eq!(file["cam"]["facings"][0]["pass_extension"], 2.0);
+    assert_eq!(file["cam"]["facings"][0]["stock_offset"], 1.0);
+    assert_eq!(file["cam"]["facings"][0]["depth"], 1.0);
     let opened: Document = serde_json::from_value(file).unwrap();
     assert_eq!(opened.cam, doc.cam);
 }
@@ -113,6 +124,7 @@ fn a_saved_cam_record_missing_its_newer_fields_opens_with_defaults() {
     assert_eq!(cam.toolpaths[0].total_depth, 0.0);
     assert!(cam.contours.is_empty(), "a design saved before 2D contours has none");
     assert!(cam.drills.is_empty(), "a design saved before drilling has none");
+    assert!(cam.facings.is_empty(), "a design saved before 2D facing has none");
 }
 
 #[test]
@@ -151,6 +163,18 @@ fn a_drill_round_trips_and_takes_an_id_from_the_designs_one_counter() {
     assert_eq!(doc.cam.drill(9), Some(&example_drill()));
     assert_eq!(doc.cam.drill(10), None);
     assert_eq!(doc.allocate_id().unwrap(), 10);
+}
+
+#[test]
+fn a_facing_round_trips_and_takes_an_id_from_the_designs_one_counter() {
+    let mut doc = Document::new("Facing");
+    doc.cam.facings.push(example_facing());
+    assert!(!doc.cam.is_empty(), "facing alone is CAM data the design saves");
+    let opened: Document = serde_json::from_value(serde_json::to_value(&doc).unwrap()).unwrap();
+    assert_eq!(opened.cam.facings, doc.cam.facings);
+    assert_eq!(doc.cam.facing(10), Some(&example_facing()));
+    assert_eq!(doc.cam.facing(11), None);
+    assert_eq!(doc.allocate_id().unwrap(), 11);
 }
 
 #[test]

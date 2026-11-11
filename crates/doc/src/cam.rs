@@ -5,8 +5,8 @@
 //! (`cam.coordinate_system.create`); a [`Setup`] takes that origin and names the raw stock, a
 //! [`Tool`] is one cutter of the design's library, a [`Toolpath`] is one operation (facing,
 //! contouring or pocketing) of a setup, cut with one tool, a [`CamContour2d`] is a profile
-//! operation that follows edges the user picked, and a [`CamDrill`] drills the holes whose
-//! centers the user picked.
+//! operation that follows edges the user picked, a [`CamFacing`] flattens the top of the stock,
+//! and a [`CamDrill`] drills the holes whose centers the user picked.
 //!
 //! Nothing here is geometry: the operations name the bodies and the coordinate system they work
 //! from, and the engine reads the part's exact B-rep when it generates a path. Setups, tools and
@@ -69,23 +69,32 @@ pub struct CamSettings {
     /// The drilling operations, each in one setup and on one tool.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub drills: Vec<CamDrill>,
+    /// The 2D facing operations, each in one setup and on one tool.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub facings: Vec<CamFacing>,
 }
 
 impl CamSettings {
     /// Whether the design keeps no CAM data at all (it then saves without the `cam` key).
     pub fn is_empty(&self) -> bool {
-        self.setups.is_empty() && self.tools.is_empty() && self.toolpaths.is_empty() && self.contours.is_empty() && self.drills.is_empty()
+        self.setups.is_empty()
+            && self.tools.is_empty()
+            && self.toolpaths.is_empty()
+            && self.contours.is_empty()
+            && self.drills.is_empty()
+            && self.facings.is_empty()
     }
 
-    /// Every identity these keep: setups, tools, toolpaths, contours and drills take ids from
-    /// the design's one counter, as every other item does.
+    /// Every identity these keep: setups, tools, toolpaths, contours, drills and facings take
+    /// ids from the design's one counter, as every other item does.
     pub fn ids(&self) -> impl Iterator<Item = u64> + '_ {
         let setups = self.setups.iter().map(|s| s.id);
         let tools = self.tools.iter().map(|t| t.id);
         let toolpaths = self.toolpaths.iter().map(|p| p.id);
         let contours = self.contours.iter().map(|c| c.id);
         let drills = self.drills.iter().map(|d| d.id);
-        setups.chain(tools).chain(toolpaths).chain(contours).chain(drills)
+        let facings = self.facings.iter().map(|f| f.id);
+        setups.chain(tools).chain(toolpaths).chain(contours).chain(drills).chain(facings)
     }
 
     /// The setup with identity `id`.
@@ -111,6 +120,11 @@ impl CamSettings {
     /// The drilling operation with identity `id`.
     pub fn drill(&self, id: u64) -> Option<&CamDrill> {
         self.drills.iter().find(|d| d.id == id)
+    }
+
+    /// The 2D facing operation with identity `id`.
+    pub fn facing(&self, id: u64) -> Option<&CamFacing> {
+        self.facings.iter().find(|f| f.id == id)
     }
 }
 
@@ -371,6 +385,41 @@ impl Default for CamDrill {
             peck_depth: 0.0,
             depth: 0.0,
         }
+    }
+}
+
+/// A 2D facing operation: the cutter sweeps back and forth across the top of the stock, one pass
+/// beside the next, down to `depth` below its top.
+///
+/// Like a [`CamContour2d`] and a [`CamDrill`], it names the setup and tool it works with and
+/// stores no geometry: the engine reads the stock and the part's exact extents when it generates
+/// the path. This is the layout a design saves (`crates/doc/src/format/pending/cam-facing-v1.rs`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CamFacing {
+    /// Its identity in the design; never reused.
+    pub id: u64,
+    /// Its name in the browser and in its program.
+    pub name: String,
+    /// The [`Setup`] it runs in: its machine zero, axes and stock.
+    pub setup: u64,
+    /// The [`Tool`] it cuts with.
+    pub tool: u64,
+    /// How far the cutter moves over between neighbouring passes, as a fraction of its diameter:
+    /// 0.1 to 1.0.
+    pub stepover: f64,
+    /// How far each pass runs beyond the stock's edge, in mm.
+    pub pass_extension: f64,
+    /// How far the raw stock extends beyond the machined bodies on each side, in mm, when the
+    /// setup states no stock size in that direction.
+    pub stock_offset: f64,
+    /// How deep the operation cuts below the top of the stock, in mm.
+    pub depth: f64,
+}
+
+impl Default for CamFacing {
+    fn default() -> Self {
+        CamFacing { id: 0, name: String::new(), setup: 0, tool: 0, stepover: 0.0, pass_extension: 0.0, stock_offset: 0.0, depth: 0.0 }
     }
 }
 
