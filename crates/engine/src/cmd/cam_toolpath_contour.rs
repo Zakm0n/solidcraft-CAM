@@ -406,7 +406,7 @@ fn open_side(found: &solidcraft_doc::ModelBody, plane: &Plane, edge: &Picked, po
 }
 
 /// An edge's exact pieces as the polyline the cutter follows, within [`PATH_TOL`].
-fn path(pieces: &[PlanarPiece], index: usize, body: &str) -> Result<Vec<Vec2>> {
+pub(crate) fn path(pieces: &[PlanarPiece], index: usize, body: &str) -> Result<Vec<Vec2>> {
     let mut points: Vec<Vec2> = Vec::new();
     for piece in pieces {
         let sampled = match piece {

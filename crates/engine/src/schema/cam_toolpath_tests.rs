@@ -4,7 +4,7 @@
 use serde_json::json;
 use solidcraft_doc::cam::{Setup, Stock};
 
-use super::{CamContour2dOutput, CamContour2dParams, ClearanceHeight, Depth, ToolpathParams, ToolpathReply};
+use super::{CamContour2dOutput, CamContour2dParams, ClearanceHeight, Depth, Pocket2DParams, Pocket2DResult, ToolpathParams, ToolpathReply};
 use crate::Session;
 use crate::schema::tests::{assert_keys, conforms};
 use crate::schema::{ParamCheck, input_schema_for, output_schema_for};
@@ -251,4 +251,25 @@ fn contour2d_params_take_edge_picks_and_refuse_hostile_values() {
     }
     let no_edges = json!({"tool": 6, "target_edges": [], "bottom_depth": 8, "stepdown": 2});
     assert!(serde_json::from_value::<CamContour2dParams>(no_edges).is_err(), "a call with no edges is refused");
+}
+
+/// The 2D pocket's contract lists exactly the keys it takes, and its reply matches what it says
+/// it returns.
+#[test]
+fn pocket2d_schemas_and_the_key_check_agree() {
+    assert_keys(input_schema_for::<Pocket2DParams>(), &["boundary_faces", "depth", "depth_per_pass", "setup", "stepover", "tool"]);
+    let schema = output_schema_for::<Pocket2DResult>();
+    let schema = schema.as_value();
+    let reply = json!({
+        "boundaries": [
+            {"body": "Plate", "role": "outer", "length": 140.0, "points": [[10.0, 5.0], [50.0, 5.0], [50.0, 35.0], [10.0, 35.0]]},
+            {"body": "Plate", "role": "hole", "length": 25.1, "points": [[30.0, 16.0], [34.0, 20.0], [30.0, 24.0]]}
+        ],
+        "passes": 2,
+        "cut_levels": [7.5, 5.0],
+        "loops": 3,
+        "waypoints": [[11.0, 6.0, 7.5], [49.0, 6.0, 7.5], [11.0, 6.0, 7.5]],
+        "length": 36.0
+    });
+    assert!(conforms(schema, schema, &reply), "{reply} doesn't match {schema}");
 }

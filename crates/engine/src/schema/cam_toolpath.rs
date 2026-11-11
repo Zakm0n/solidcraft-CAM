@@ -1,6 +1,7 @@
 //! Contracts and result types for the commands in `cmd/cam_toolpath.rs`: contour and pocket
-//! toolpaths (`cam.toolpath.contour` and `cam.toolpath.pocket`), and the 2D contour operation
-//! that follows picked edges (`cam.toolpath.contour2d`).
+//! toolpaths (`cam.toolpath.contour` and `cam.toolpath.pocket`), the 2D contour operation that
+//! follows picked edges (`cam.toolpath.contour2d`), and the 2D pocket that clears the region of
+//! picked faces (`cam.toolpath.pocket_2d`, in `cmd/cam_toolpath_pocket.rs`).
 //!
 //! The handlers read their parameters from the raw JSON, so each key here accepts what its
 //! handler reads and fails with the handler's message. The ranges are shared as `*_PROBLEM`
@@ -19,7 +20,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use solidcraft_doc::cam::ToolpathKind;
 
-use super::types::EdgeRefs;
+use super::types::{EdgeRefs, FaceRefs, LengthExpr};
 
 /// A feed, plunge or spindle rate is 0 (not stated) to 1,000,000.
 pub const RATE_PROBLEM: &str = "must be a number from 0 to 1000000";
@@ -388,6 +389,59 @@ pub struct CamContour2dOutput {
     pub cut_levels: Vec<f64>,
     /// The generated toolpath, in cutting order: its points in the setup's machine coordinates,
     /// in mm. Each edge contributes its offset polyline once per cut level.
+    pub waypoints: Vec<[f64; 3]>,
+    /// The toolpath's cutting length, in mm.
+    pub length: f64,
+    /// In the warn parameter-check mode: what the call's parameters got wrong.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_warnings: Vec<String>,
+}
+
+/// The parameters a 2D pocket takes: the faces whose region it clears, the setup and tool it cuts
+/// with, and the values it cuts at.
+///
+/// Unlike [`CamContour2dParams`], which follows picked edges, the pocket clears the whole region
+/// inside the picked faces: each face's exact outer loop and the openings inside it. Every face
+/// must be planar and parallel to the setup's X/Y.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct Pocket2DParams {
+    /// The setup it runs in: its machine zero, axes and stock. Default: the model origin and the
+    /// model's own axes, with the stock read from the bodies the faces lie on.
+    #[serde(default)]
+    pub setup: Option<u64>,
+    /// The tool it cuts with: a tool's id in this design. Its radius and its stepover decide the
+    /// offset passes.
+    pub tool: u64,
+    /// The faces whose region it clears: a point on each, or its name from `model.faces`. 1 to
+    /// 1000 faces, each planar and parallel to the setup's X/Y.
+    pub boundary_faces: FaceRefs,
+    /// How far the cutter moves over between neighbouring passes, in mm: a length or an
+    /// expression such as `"d / 2"`. Above 0 and at most the tool's diameter.
+    pub stepover: LengthExpr,
+    /// How deep the operation cuts below the top of the stock, in mm: a length or an expression.
+    /// Above 0 and at most the stock's height.
+    pub depth: LengthExpr,
+    /// How deep one pass cuts, in mm: a length or an expression. Default: the whole depth (one
+    /// pass).
+    #[serde(default)]
+    pub depth_per_pass: Option<LengthExpr>,
+}
+
+/// What `cam.toolpath.pocket_2d` returns: the exact boundaries it cleared, the passes it planned
+/// and the toolpath it generated.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct Pocket2DResult {
+    /// The picked faces' boundary loops, the outer ones before the holes.
+    pub boundaries: Vec<BoundaryLoop>,
+    /// How many passes down the depth it takes.
+    pub passes: usize,
+    /// The height of each pass above the machine zero along the setup's Z, deepest last, in mm.
+    pub cut_levels: Vec<f64>,
+    /// How many closed offset loops the cutter runs at each cut level.
+    pub loops: usize,
+    /// The generated toolpath, in cutting order: its points in the setup's machine coordinates,
+    /// in mm. Each closed loop ends where it started.
     pub waypoints: Vec<[f64; 3]>,
     /// The toolpath's cutting length, in mm.
     pub length: f64,
