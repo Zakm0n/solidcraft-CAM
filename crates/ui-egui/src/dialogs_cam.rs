@@ -15,6 +15,9 @@ use solidcraft_engine::doc::joints::JointKind;
 use solidcraft_engine::geom::prelude::*;
 use solidcraft_engine::kernel::FaceSurface;
 
+#[path = "dialogs_cam_drill.rs"]
+pub mod drill;
+
 use super::{ROUND, joint_row, occurrence, pick, picked_radius, trim, turn};
 use crate::SolveApp;
 use crate::dialogs::Kind;
@@ -228,6 +231,9 @@ pub enum Zcam {
     /// Clear the region of the picked faces with concentric offset passes
     /// (`cam.toolpath.pocket_2d`).
     Pocket2d(DialogCamPocket2d),
+    /// Plunge a tool at the picked holes' rims, in a cycle down to the chosen depth
+    /// (`cam.toolpath.drill`).
+    Drill(drill::DialogCamDrill),
 }
 
 impl Zcam {
@@ -247,6 +253,7 @@ impl Zcam {
             Zcam::Contour2d(_) => "cam.toolpath.contour2d",
             Zcam::Pocket(_) => "cam.toolpath.pocket",
             Zcam::Pocket2d(_) => "cam.toolpath.pocket_2d",
+            Zcam::Drill(_) => "cam.toolpath.drill",
         }
     }
 
@@ -260,6 +267,7 @@ impl Zcam {
             Zcam::Contour2d(_) => "2D CONTOUR",
             Zcam::Pocket(_) => "POCKET",
             Zcam::Pocket2d(_) => "2D POCKET",
+            Zcam::Drill(_) => "DRILLING",
         }
     }
 }
@@ -1256,6 +1264,10 @@ pub fn start_workspace(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)
         "cam.toolpath.contour2d" => Some((Kind::Cam(Zcam::Contour2d(DialogCamContour2d::new(app))), vec![SelInput::new("Edges", EDGES, true)])),
         "cam.toolpath.pocket" => Some((Kind::Cam(Zcam::Pocket(DialogCamPocket::new(app))), Vec::new())),
         "cam.toolpath.pocket_2d" => Some((Kind::Cam(Zcam::Pocket2d(DialogCamPocket2d::new(app))), vec![SelInput::new("Faces", FACES, true)])),
+        "cam.toolpath.drill" => {
+            let (f, inputs) = drill::start(app);
+            Some((Kind::Cam(Zcam::Drill(f)), inputs))
+        }
         _ => None,
     }
 }
@@ -1270,6 +1282,7 @@ pub fn zcam_rows(app: &mut SolveApp, ui: &mut egui::Ui, form: &mut Zcam) -> bool
         Zcam::Contour2d(f) => contour2d_rows(app, ui, f),
         Zcam::Pocket(f) => toolpath_rows(app, ui, &mut f.form),
         Zcam::Pocket2d(f) => pocket2d_rows(app, ui, f),
+        Zcam::Drill(f) => drill::rows(app, ui, f),
     }
 }
 
@@ -1394,6 +1407,7 @@ pub fn zcam_commands(app: &SolveApp, form: &Zcam, inputs: &[SelInput]) -> Result
         Zcam::Contour2d(f) => contour2d_params(app, f, inputs).map(|p| vec![("cam.toolpath.contour2d".to_string(), p)]),
         Zcam::Pocket(f) => toolpath_commands(app, &f.form, "cam.toolpath.pocket"),
         Zcam::Pocket2d(f) => pocket2d_params(app, f, inputs).map(|p| vec![("cam.toolpath.pocket_2d".to_string(), p)]),
+        Zcam::Drill(f) => drill::params(app, f, inputs).map(|p| vec![("cam.toolpath.drill".to_string(), p)]),
     }
 }
 

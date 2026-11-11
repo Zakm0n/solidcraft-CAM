@@ -1038,3 +1038,76 @@ fn a_click_mode_keeps_the_view_repainting() {
     g.set_active_state(GnomonActiveState::Idle);
     assert!(!g.tracks_pointer(), "a mode that ended asks for no repaint");
 }
+
+/// A plate with a through hole at (20, 10), its 8 mm drill, and a setup, for the drilling tests.
+fn drilled_plate() -> (SolveApp, Sel) {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    app.run("solid.box", json!({"length": 40, "width": 20, "height": 10, "body_name": "Plate"})).unwrap();
+    app.run("solid.cylinder", json!({"base": [20, 10, -1], "radius": 4, "height": 12, "operation": "cut", "targets": ["Plate"]})).unwrap();
+    app.run("cam.tool.create", json!({"name": "8 drill", "diameter": 8.0})).unwrap();
+    app.run("cam.setup.create", json!({"name": "Roughing"})).unwrap();
+    // A point on the top rim of the hole.
+    let pick = edge(&app, Vec3::new(24.0, 10.0, 10.0));
+    (app, pick)
+}
+
+/// The Toolpath tab's Drilling dialog builds `cam.toolpath.drill` from the picked hole rim, its
+/// setup, tool, cycle, depth reference and values, and the design stores the operation.
+#[test]
+fn the_drill_dialog_builds_the_operation() {
+    let (mut app, pick) = drilled_plate();
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.toolpath.drill").expect("the Drilling command opens a dialog");
+    assert_eq!(d.inputs.len(), 1, "the hole centers are the dialog's input");
+    d.inputs[0].items = vec![pick];
+    if let Kind::Cam(Zcam::Drill(f)) = &mut d.kind {
+        // The design's only setup is chosen, and its only tool.
+        assert_eq!((f.setup, f.tool), (1, 0));
+        assert_eq!((f.cycle_type, f.depth_reference), (0, 0), "a standard cycle at the hole's bottom");
+        f.name = "Holes".into();
+        f.cycle_type = 1;
+        f.peck_depth = "4 mm".into();
+        f.clearance_height = "5 mm".into();
+    } else {
+        panic!("cam.toolpath.drill has the wrong dialog");
+    }
+    let cmds = apply_commands(&app, &d).unwrap();
+    assert_eq!(cmds[0].0, "cam.toolpath.drill");
+    assert_eq!(cmds[0].1["name"], "Holes");
+    assert_eq!(cmds[0].1["tool"], app.session.doc.cam.tools[0].id);
+    assert_eq!(cmds[0].1["setup"], app.session.doc.cam.setups[0].id);
+    assert_eq!(cmds[0].1["cycle_type"], "peck");
+    assert_eq!(cmds[0].1["depth_reference"], "hole_bottom");
+    assert_eq!(cmds[0].1["peck_depth"], 4.0);
+    assert_eq!(cmds[0].1["clearance_height"], 5.0);
+    let centers = cmds[0].1["hole_centers"].as_array().expect("the picked hole rims");
+    assert_eq!(centers.len(), 1, "{centers:?}");
+    assert!(centers[0].as_str().is_some_and(|name| !name.is_empty()), "{centers:?}");
+    for (id, params) in cmds {
+        app.run(&id, params).unwrap();
+    }
+    let drill = app.session.doc.cam.drills.first().expect("the design stores the operation");
+    assert_eq!((drill.name.as_str(), drill.hole_centers.len()), ("Holes", 1));
+    assert_eq!(drill.cycle_type, solidcraft_engine::doc::cam::DrillCycle::Peck);
+    assert_eq!(drill.depth_reference, solidcraft_engine::doc::cam::DrillDepthReference::HoleBottom);
+    assert_eq!((drill.peck_depth, drill.clearance_height), (4.0, 5.0));
+}
+
+/// An absolute depth reference needs its depth, so OK reports the missing value instead of
+/// sending a call the command would refuse; a stated depth is sent in mm.
+#[test]
+fn the_drill_dialog_needs_a_depth_for_an_absolute_reference() {
+    let (app, pick) = drilled_plate();
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.toolpath.drill").expect("the Drilling command opens a dialog");
+    d.inputs[0].items = vec![pick];
+    {
+        let Kind::Cam(Zcam::Drill(f)) = &mut d.kind else { panic!("cam.toolpath.drill has the wrong dialog") };
+        f.depth_reference = 2;
+    }
+    let why = apply_commands(&app, &d).expect_err("an absolute depth needs its depth");
+    assert!(why.contains("depth"), "{why}");
+    let Kind::Cam(Zcam::Drill(f)) = &mut d.kind else { panic!("cam.toolpath.drill has the wrong dialog") };
+    f.depth = "6 mm".into();
+    let cmds = apply_commands(&app, &d).unwrap();
+    assert_eq!(cmds[0].1["depth_reference"], "absolute");
+    assert_eq!(cmds[0].1["depth"], 6.0);
+}

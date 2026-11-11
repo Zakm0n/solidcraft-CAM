@@ -8,7 +8,7 @@
 //! another one.
 
 use egui::{Rect, Sense, pos2, vec2};
-use solidcraft_engine::doc::cam::{CamContour2d, Toolpath, ToolpathKind};
+use solidcraft_engine::doc::cam::{CamContour2d, CamDrill, DrillCycle, Toolpath, ToolpathKind};
 
 use crate::SolveApp;
 use crate::context_menu::{Item, Target};
@@ -23,6 +23,16 @@ fn contours_in(cam: &solidcraft_engine::doc::cam::CamSettings, setup: u64) -> im
 /// The 2D contour operations that name no setup the design has: they cut at the model origin.
 fn contours_at_origin(cam: &solidcraft_engine::doc::cam::CamSettings) -> impl Iterator<Item = &CamContour2d> + '_ {
     cam.contours.iter().filter(move |contour| cam.setup(contour.setup).is_none())
+}
+
+/// The drilling operations that run in `setup`, in the order they were made.
+fn drills_in(cam: &solidcraft_engine::doc::cam::CamSettings, setup: u64) -> impl Iterator<Item = &CamDrill> + '_ {
+    cam.drills.iter().filter(move |drill| drill.setup == setup)
+}
+
+/// The drilling operations that name no setup the design has: they drill at the model origin.
+fn drills_at_origin(cam: &solidcraft_engine::doc::cam::CamSettings) -> impl Iterator<Item = &CamDrill> + '_ {
+    cam.drills.iter().filter(move |drill| cam.setup(drill.setup).is_none())
 }
 
 /// The card's inner margin, matching the Browser card's inset.
@@ -73,7 +83,7 @@ fn header(ui: &mut egui::Ui) {
 fn body(app: &mut SolveApp, ui: &mut egui::Ui) {
     let t = Tokens::get();
     let cam = app.session.doc.cam.clone();
-    if cam.setups.is_empty() && cam.toolpaths.is_empty() && cam.contours.is_empty() {
+    if cam.setups.is_empty() && cam.toolpaths.is_empty() && cam.contours.is_empty() && cam.drills.is_empty() {
         empty_state(ui);
         return;
     }
@@ -82,7 +92,7 @@ fn body(app: &mut SolveApp, ui: &mut egui::Ui) {
         ui.add_space(t.space_4);
         for setup in &cam.setups {
             let target = format!("cam:toolpaths:setup:{}", setup.id);
-            let count = cam.toolpaths_in(setup.id).count() + contours_in(&cam, setup.id).count();
+            let count = cam.toolpaths_in(setup.id).count() + contours_in(&cam, setup.id).count() + drills_in(&cam, setup.id).count();
             group_row(ui, &setup.name, count, &target);
             for toolpath in cam.toolpaths_in(setup.id) {
                 toolpath_row(app, ui, toolpath);
@@ -90,16 +100,23 @@ fn body(app: &mut SolveApp, ui: &mut egui::Ui) {
             for contour in contours_in(&cam, setup.id) {
                 contour_row(app, ui, contour);
             }
+            for drill in drills_in(&cam, setup.id) {
+                drill_row(app, ui, drill);
+            }
         }
         let unassigned: Vec<&Toolpath> = cam.toolpaths.iter().filter(|p| cam.setup(p.setup).is_none()).collect();
         let contours: Vec<&CamContour2d> = contours_at_origin(&cam).collect();
-        if !unassigned.is_empty() || !contours.is_empty() {
-            group_row(ui, crate::i18n::tr_label("Model origin"), unassigned.len() + contours.len(), "cam:toolpaths:setup:0");
+        let drills: Vec<&CamDrill> = drills_at_origin(&cam).collect();
+        if !unassigned.is_empty() || !contours.is_empty() || !drills.is_empty() {
+            group_row(ui, crate::i18n::tr_label("Model origin"), unassigned.len() + contours.len() + drills.len(), "cam:toolpaths:setup:0");
             for toolpath in unassigned {
                 toolpath_row(app, ui, toolpath);
             }
             for contour in contours {
                 contour_row(app, ui, contour);
+            }
+            for drill in drills {
+                drill_row(app, ui, drill);
             }
         }
         ui.add_space(t.space_4);
@@ -173,6 +190,35 @@ fn contour_row(app: &mut SolveApp, ui: &mut egui::Ui, contour: &CamContour2d) {
         })
         .response;
     let target = format!("cam:toolpaths:contour:{}", contour.id);
+    crate::scenario::publish_rect(&target, response.rect);
+    crate::scenario::publish_handle(&target, response.rect.center());
+}
+
+/// One drilling operation under its setup: its name, and the operation, tool, hole count and
+/// cycle it runs.
+fn drill_row(app: &mut SolveApp, ui: &mut egui::Ui, drill: &CamDrill) {
+    let t = Tokens::get();
+    let kind = crate::i18n::tr_label("Drilling");
+    let cycle = match drill.cycle_type {
+        DrillCycle::Standard => crate::i18n::tr_label("Standard"),
+        DrillCycle::Peck => crate::i18n::tr_label("Peck"),
+        DrillCycle::DeepHole => crate::i18n::tr_label("Deep hole"),
+    };
+    let tool = app.session.doc.cam.tool(drill.tool).map(|tool| tool.name.as_str()).unwrap_or("");
+    let holes = drill.hole_centers.len();
+    let cuts = if tool.is_empty() { kind.to_string() } else { format!("{kind} · {tool}") };
+    let secondary = format!("{cuts} · {holes} × {cycle}");
+    let response = ui
+        .horizontal(|ui| {
+            ui.add_space(t.space_4 + CHILD_INDENT);
+            ui.label(egui::RichText::new(crate::i18n::tr_name(&drill.name)).size(t.font_body).color(t.text));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(t.space_4);
+                ui.label(egui::RichText::new(secondary).size(t.font_small).color(t.text_dim));
+            });
+        })
+        .response;
+    let target = format!("cam:toolpaths:drill:{}", drill.id);
     crate::scenario::publish_rect(&target, response.rect);
     crate::scenario::publish_handle(&target, response.rect.center());
 }
