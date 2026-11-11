@@ -4,8 +4,9 @@
 //! A [`CoordinateSystem`] places the machine zero and the machine's own X, Y and Z directions
 //! (`cam.coordinate_system.create`); a [`Setup`] takes that origin and names the raw stock, a
 //! [`Tool`] is one cutter of the design's library, a [`Toolpath`] is one operation (facing,
-//! contouring or pocketing) of a setup, cut with one tool, and a [`CamContour2d`] is a profile
-//! operation that follows edges the user picked.
+//! contouring or pocketing) of a setup, cut with one tool, a [`CamContour2d`] is a profile
+//! operation that follows edges the user picked, and a [`CamDrill`] drills the holes whose
+//! centers the user picked.
 //!
 //! Nothing here is geometry: the operations name the bodies and the coordinate system they work
 //! from, and the engine reads the part's exact B-rep when it generates a path. Setups, tools and
@@ -65,22 +66,26 @@ pub struct CamSettings {
     /// The 2D contour operations, each in one setup and on one tool.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub contours: Vec<CamContour2d>,
+    /// The drilling operations, each in one setup and on one tool.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub drills: Vec<CamDrill>,
 }
 
 impl CamSettings {
     /// Whether the design keeps no CAM data at all (it then saves without the `cam` key).
     pub fn is_empty(&self) -> bool {
-        self.setups.is_empty() && self.tools.is_empty() && self.toolpaths.is_empty() && self.contours.is_empty()
+        self.setups.is_empty() && self.tools.is_empty() && self.toolpaths.is_empty() && self.contours.is_empty() && self.drills.is_empty()
     }
 
-    /// Every identity these keep: setups, tools, toolpaths and contours take ids from the
-    /// design's one counter, as every other item does.
+    /// Every identity these keep: setups, tools, toolpaths, contours and drills take ids from
+    /// the design's one counter, as every other item does.
     pub fn ids(&self) -> impl Iterator<Item = u64> + '_ {
         let setups = self.setups.iter().map(|s| s.id);
         let tools = self.tools.iter().map(|t| t.id);
         let toolpaths = self.toolpaths.iter().map(|p| p.id);
         let contours = self.contours.iter().map(|c| c.id);
-        setups.chain(tools).chain(toolpaths).chain(contours)
+        let drills = self.drills.iter().map(|d| d.id);
+        setups.chain(tools).chain(toolpaths).chain(contours).chain(drills)
     }
 
     /// The setup with identity `id`.
@@ -101,6 +106,11 @@ impl CamSettings {
     /// The 2D contour operation with identity `id`.
     pub fn contour(&self, id: u64) -> Option<&CamContour2d> {
         self.contours.iter().find(|c| c.id == id)
+    }
+
+    /// The drilling operation with identity `id`.
+    pub fn drill(&self, id: u64) -> Option<&CamDrill> {
+        self.drills.iter().find(|d| d.id == id)
     }
 }
 
@@ -280,6 +290,86 @@ impl Default for CamContour2d {
             clearance_height: 0.0,
             bottom_depth: 0.0,
             stepdown: 0.0,
+        }
+    }
+}
+
+/// The cycle a drilling operation runs between the top of a hole and its bottom.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrillCycle {
+    /// Plunge to the bottom in one move, then retract.
+    #[default]
+    Standard,
+    /// Plunge one peck at a time and retract clear of the hole between pecks, so the chips
+    /// leave it.
+    Peck,
+    /// Plunge one peck at a time and retract only just inside the hole between pecks, so the
+    /// cutter stays guided by it.
+    DeepHole,
+}
+
+/// Where a drilling operation takes the depth it cuts down to from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrillDepthReference {
+    /// The bottom of the hole the picked center is in.
+    #[default]
+    HoleBottom,
+    /// The lowest point of the machined bodies.
+    ModelBottom,
+    /// A height the operation states itself, below the top of the stock.
+    Absolute,
+}
+
+/// A drilling operation: one tool plunging at the picked hole centers, in a cycle, down to the
+/// depth its reference names.
+///
+/// Like a [`CamContour2d`], it names the setup and tool it works with and stores no geometry:
+/// the engine reads the part's exact B-rep when it generates the path. The hole centers are
+/// exact vertex or point references by their persistent names
+/// (`crate::persistent_name`), so they follow the part as it changes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CamDrill {
+    /// Its identity in the design; never reused.
+    pub id: u64,
+    /// Its name in the browser and in its program.
+    pub name: String,
+    /// The [`Setup`] it runs in: its machine zero, axes and stock.
+    pub setup: u64,
+    /// The [`Tool`] it drills with.
+    pub tool: u64,
+    /// The centers it drills at, by the persistent names of the exact vertex or point of each
+    /// hole.
+    pub hole_centers: Vec<String>,
+    /// The cycle it runs.
+    pub cycle_type: DrillCycle,
+    /// Where it takes its depth from.
+    pub depth_reference: DrillDepthReference,
+    /// The height it travels at between holes, above the top of the stock, in mm.
+    pub clearance_height: f64,
+    /// How deep one peck cuts in a `peck` or `deep_hole` cycle, in mm; 0 takes the tool's flute
+    /// length.
+    pub peck_depth: f64,
+    /// How deep it cuts below the top of the stock, in mm, when its reference is `absolute`;
+    /// the other references take the depth from the part's exact geometry.
+    pub depth: f64,
+}
+
+impl Default for CamDrill {
+    fn default() -> Self {
+        CamDrill {
+            id: 0,
+            name: String::new(),
+            setup: 0,
+            tool: 0,
+            hole_centers: Vec::new(),
+            cycle_type: DrillCycle::default(),
+            depth_reference: DrillDepthReference::default(),
+            clearance_height: 0.0,
+            peck_depth: 0.0,
+            depth: 0.0,
         }
     }
 }

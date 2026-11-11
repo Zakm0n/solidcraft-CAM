@@ -62,6 +62,7 @@ pub mod cam_export;
 pub mod cam_setup;
 pub mod cam_tool;
 pub mod cam_toolpath;
+pub mod cam_toolpath_drill;
 pub mod canvas;
 pub mod clearance;
 pub mod compare;
