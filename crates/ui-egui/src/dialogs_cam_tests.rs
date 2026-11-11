@@ -142,6 +142,32 @@ fn the_setup_dialog_creates_a_setup() {
     assert_eq!(app.session.doc.cam.setups[0].name, "Roughing");
 }
 
+/// The Setup dialog's coordinate system choice names the machine zero the setup works from; the
+/// model origin, the first choice, is left out so the command keeps its own default.
+#[test]
+fn the_setup_dialog_works_from_the_chosen_coordinate_system() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    let created = app.run("cam.coordinate_system.create", json!({"name": "Top"})).unwrap();
+    let cs = created["coordinate_system"].as_u64().expect("the coordinate system's id");
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.setup.create").expect("the Setup command opens a dialog");
+    let origin = apply_commands(&app, &d).unwrap();
+    assert!(origin[0].1.get("coordinate_system").is_none(), "the model origin is the command's own default: {}", origin[0].1);
+    if let Kind::Cam(Zcam::Setup(f)) = &mut d.kind {
+        assert_eq!(f.coordinate_system, 0, "a new setup starts at the model origin");
+        // Choice n is the design's coordinate system n - 1.
+        f.coordinate_system = 1;
+    } else {
+        panic!("cam.setup.create has the wrong dialog");
+    }
+    let cmds = apply_commands(&app, &d).unwrap();
+    assert_eq!(cmds[0].0, "cam.setup.create");
+    assert_eq!(cmds[0].1["coordinate_system"], cs);
+    for (id, params) in cmds {
+        app.run(&id, params).unwrap();
+    }
+    assert_eq!(app.session.doc.cam.setups[0].coordinate_system, cs, "the setup works from the chosen coordinate system");
+}
+
 /// The Toolpath tab's Contour dialog builds `cam.toolpath.contour` from its setup, tool and
 /// cutting values; a field left empty is not sent, so the command keeps its default.
 #[test]
