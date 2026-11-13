@@ -40,6 +40,7 @@ mod dialog_descriptor;
 pub mod dialogs;
 pub mod dialogs_appearance;
 pub mod dialogs_assembly;
+pub mod dialogs_cam_pocket;
 pub mod dialogs_coupling;
 pub mod dialogs_frame;
 mod dialogs_hole;

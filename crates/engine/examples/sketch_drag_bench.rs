@@ -92,7 +92,7 @@ fn main() -> Result<()> {
             let elapsed_ns = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
             let response: Value = response?;
             let id = s.active_sketch.ok_or("missing sketch")?;
-            let state = s.world_state();
+            let state = s.world_state()?;
             let report = &state.sketch(id).ok_or("missing published sketch")?.report;
             if !report.ok() || report.redundant.is_empty() {
                 return Err(format!("{name}: missing full diagnostics: {report:?}; response {response}; counters {:?}", profile.counters).into());

@@ -4,6 +4,7 @@ mod four_bar;
 use four_bar::Result;
 use serde_json::json;
 use solidcore_record::Vec2;
+use solidcraft_geom::Vec2Geom;
 use solidcraft_sketch::profiling::capture;
 use std::{io::Write, time::Instant};
 

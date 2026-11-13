@@ -223,6 +223,36 @@ fn the_pocket_dialog_names_the_model_origin_without_a_setup() {
     assert_eq!(cmds[0].1["stock_to_leave"], 0.2);
 }
 
+/// The Pocket dialog evaluates each cutting value as an expression against the design, so a
+/// pass depth can be arithmetic and every stated value reaches `cam.toolpath.pocket` in mm.
+#[test]
+fn the_pocket_dialog_evaluates_its_cutting_expressions() {
+    let mut app = SolveApp::new(Session::default(), Services::default());
+    app.run("cam.tool.create", json!({"name": "6 flat", "diameter": 6.0})).unwrap();
+    let mut d = crate::dialogs::Dialog::for_command(&app, "cam.toolpath.pocket").expect("the Pocket command opens a dialog");
+    if let Kind::Cam(Zcam::Pocket(f)) = &mut d.kind {
+        f.stepover = "3 mm".into();
+        f.depth_per_pass = "2 mm + 1".into();
+        f.total_depth = "12 mm".into();
+        f.stock_to_leave = "0.5 mm".into();
+        f.feed_rate = "600".into();
+    } else {
+        panic!("cam.toolpath.pocket has the wrong dialog");
+    }
+    let cmds = apply_commands(&app, &d).unwrap();
+    assert_eq!(cmds[0].0, "cam.toolpath.pocket");
+    assert_eq!(cmds[0].1["stepover"], 3.0);
+    assert_eq!(cmds[0].1["depth_per_pass"], 3.0, "the expression is evaluated: {}", cmds[0].1);
+    assert_eq!(cmds[0].1["total_depth"], 12.0);
+    assert_eq!(cmds[0].1["stock_to_leave"], 0.5);
+    assert_eq!(cmds[0].1["feed_rate"], 600.0);
+    // A malformed expression is refused before the command runs, naming the field.
+    let Kind::Cam(Zcam::Pocket(f)) = &mut d.kind else { panic!("cam.toolpath.pocket has the wrong dialog") };
+    f.depth_per_pass = "2 mm +".into();
+    let why = apply_commands(&app, &d).expect_err("a malformed expression cannot be sent");
+    assert!(why.contains("Depth per pass"), "{why}");
+}
+
 /// The Toolpath tab's 2D Pocket dialog builds `cam.toolpath.pocket_2d` from the face it picked,
 /// its setup, its tool, the stepover between its passes and its depth.
 #[test]

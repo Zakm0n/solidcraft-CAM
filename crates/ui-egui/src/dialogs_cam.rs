@@ -25,6 +25,7 @@ use crate::SolveApp;
 use crate::dialogs::Kind;
 use crate::dialogs::{Dialog, combo, field, form_row};
 use crate::dialogs_assembly::Asm;
+use crate::dialogs_cam_pocket::PocketDialog;
 use crate::dynamic_gnomon::{DynamicGnomon, GnomonActiveState, GnomonAlignMode, GnomonHandle, IncrementalKeys, InputState, SnapCandidate};
 use crate::selection::{BODIES, EDGES, FACES, PROFILES, SelInput, SelectionExt as _, VERTICES};
 use crate::theme::Tokens;
@@ -229,7 +230,7 @@ pub enum Zcam {
     /// (`cam.toolpath.contour2d`).
     Contour2d(DialogCamContour2d),
     /// Clear the material inside a part's outline (`cam.toolpath.pocket`).
-    Pocket(DialogCamPocket),
+    Pocket(PocketDialog),
     /// Clear the region of the picked faces with concentric offset passes
     /// (`cam.toolpath.pocket_2d`).
     Pocket2d(DialogCamPocket2d),
@@ -1050,31 +1051,6 @@ impl std::ops::DerefMut for DialogCamContour {
     }
 }
 
-/// Pocket: clear the material inside the part's outline (`cam.toolpath.pocket`).
-#[derive(Clone, Debug)]
-pub struct DialogCamPocket {
-    pub form: DialogCamToolpath,
-}
-
-impl DialogCamPocket {
-    fn new(app: &SolveApp) -> Self {
-        DialogCamPocket { form: DialogCamToolpath::new(app) }
-    }
-}
-
-impl std::ops::Deref for DialogCamPocket {
-    type Target = DialogCamToolpath;
-    fn deref(&self) -> &Self::Target {
-        &self.form
-    }
-}
-
-impl std::ops::DerefMut for DialogCamPocket {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.form
-    }
-}
-
 /// 2D Contour: follow the picked edges with the side of the cutter (`cam.toolpath.contour2d`).
 ///
 /// The edges are picked in the view; the engine reads their exact B-rep curves, offsets them by
@@ -1269,7 +1245,7 @@ pub fn start_workspace(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)
         "cam.tool.list" => Some((Kind::Cam(Zcam::ToolLibrary(DialogCamToolLibrary::new(app))), Vec::new())),
         "cam.toolpath.contour" => Some((Kind::Cam(Zcam::Contour(DialogCamContour::new(app))), Vec::new())),
         "cam.toolpath.contour2d" => Some((Kind::Cam(Zcam::Contour2d(DialogCamContour2d::new(app))), vec![SelInput::new("Edges", EDGES, true)])),
-        "cam.toolpath.pocket" => Some((Kind::Cam(Zcam::Pocket(DialogCamPocket::new(app))), Vec::new())),
+        "cam.toolpath.pocket" => Some((Kind::Cam(Zcam::Pocket(PocketDialog::new(app))), Vec::new())),
         "cam.toolpath.pocket_2d" => Some((Kind::Cam(Zcam::Pocket2d(DialogCamPocket2d::new(app))), vec![SelInput::new("Faces", FACES, true)])),
         "cam.toolpath.drill" => {
             let (f, inputs) = drill::start(app);
@@ -1288,7 +1264,7 @@ pub fn zcam_rows(app: &mut SolveApp, ui: &mut egui::Ui, form: &mut Zcam) -> bool
         Zcam::ToolLibrary(f) => tool_rows(app, ui, f),
         Zcam::Contour(f) => toolpath_rows(app, ui, &mut f.form),
         Zcam::Contour2d(f) => contour2d_rows(app, ui, f),
-        Zcam::Pocket(f) => toolpath_rows(app, ui, &mut f.form),
+        Zcam::Pocket(f) => crate::dialogs_cam_pocket::draw_pocket_dialog(app, ui, f),
         Zcam::Pocket2d(f) => pocket2d_rows(app, ui, f),
         Zcam::Drill(f) => drill::rows(app, ui, f),
         Zcam::Facing(f) => facing::draw_facing_dialog(app, ui, f),
@@ -1414,7 +1390,7 @@ pub fn zcam_commands(app: &SolveApp, form: &Zcam, inputs: &[SelInput]) -> Result
         Zcam::ToolLibrary(f) => tool_commands(app, f),
         Zcam::Contour(f) => toolpath_commands(app, &f.form, "cam.toolpath.contour"),
         Zcam::Contour2d(f) => contour2d_params(app, f, inputs).map(|p| vec![("cam.toolpath.contour2d".to_string(), p)]),
-        Zcam::Pocket(f) => toolpath_commands(app, &f.form, "cam.toolpath.pocket"),
+        Zcam::Pocket(f) => crate::dialogs_cam_pocket::params(app, f).map(|p| vec![("cam.toolpath.pocket".to_string(), p)]),
         Zcam::Pocket2d(f) => pocket2d_params(app, f, inputs).map(|p| vec![("cam.toolpath.pocket_2d".to_string(), p)]),
         Zcam::Drill(f) => drill::params(app, f, inputs).map(|p| vec![("cam.toolpath.drill".to_string(), p)]),
         Zcam::Facing(f) => facing::params(app, f).map(|p| vec![("cam.toolpath.facing".to_string(), p)]),
