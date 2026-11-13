@@ -149,3 +149,7 @@ pub struct CamToolpathFacingOutput {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_warnings: Vec<String>,
 }
+
+#[cfg(test)]
+#[path = "cam_toolpath_facing_tests.rs"]
+mod tests;

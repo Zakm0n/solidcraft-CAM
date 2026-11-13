@@ -356,3 +356,7 @@ fn summary(facing: &CamFacing) -> CamToolpathFacingSummary {
         depth: facing.depth,
     }
 }
+
+#[cfg(test)]
+#[path = "cam_toolpath_facing_tests.rs"]
+mod tests;
